@@ -27,10 +27,25 @@ OLLAMA_HOST = _normalize_host(os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1")
 # 速度調整に使う Ollama options をJSON文字列で渡せる
 # 例: OLLAMA_OPTIONS_JSON={"num_predict":128,"temperature":0.6}
-try:
-    OLLAMA_OPTIONS = json.loads(os.getenv("OLLAMA_OPTIONS_JSON","{}"))
-except Exception:
-    OLLAMA_OPTIONS = {}
+
+def _load_json_env(key: str) -> dict:
+    """環境変数に格納されたJSON文字列を辞書として読み出す。
+
+    不正なJSONや辞書以外の構造が入っていた場合でも例外を発生させず、
+    空の辞書を返して後続処理を止めない。実運用時に環境変数の入力ミスが
+    発生してもアプリ全体が停止しないよう、ここで安全側に倒す。
+    """
+    raw = os.getenv(key, "{}")
+    try:
+        value = json.loads(raw)
+        if isinstance(value, dict):
+            return value
+    except Exception:
+        pass
+    return {}
+
+OLLAMA_OPTIONS = _load_json_env("OLLAMA_OPTIONS_JSON")
+OLLAMA_PAYLOAD_OVERRIDES = _load_json_env("OLLAMA_PAYLOAD_JSON")
 
 ASR_DEVICE = os.getenv("ASR_DEVICE", "")
 ASR_BLOCK_SIZE = int(os.getenv("ASR_BLOCK_SIZE", "1600"))
