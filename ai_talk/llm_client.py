@@ -5,7 +5,7 @@ Ollama クライアント。ストリーミングを文単位で yield。
 import requests, json, re
 from typing import Iterable
 from copy import deepcopy
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from .config import (
     OLLAMA_HOST,
     OLLAMA_MODEL,
@@ -13,6 +13,31 @@ from .config import (
     OLLAMA_PAYLOAD_OVERRIDES,
     OLLAMA_GENERATE_PATH,
 )
+
+
+def _is_chat_endpoint() -> bool:
+    """OLLAMA_GENERATE_PATH が /api/chat 系かどうかを判定する。"""
+
+    parsed = urlparse(OLLAMA_GENERATE_PATH)
+    # 相対パスの場合は path に格納される。絶対URLなら path 部分のみを見る。
+    path = parsed.path or OLLAMA_GENERATE_PATH
+    normalized = path.split("?", 1)[0].rstrip("/").lower()
+    return normalized.endswith("/api/chat")
+
+
+def _extract_response_text(data: dict) -> str:
+    """generate/chat 双方のレスポンスからテキスト部分のみを取り出す。"""
+
+    if not isinstance(data, dict):
+        return ""
+    if isinstance(data.get("response"), str):
+        return data["response"]
+    message = data.get("message")
+    if isinstance(message, dict):
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+    return ""
 
 
 def _build_payload(prompt: str, system: str, stream: bool) -> dict:
@@ -32,6 +57,7 @@ def _build_payload(prompt: str, system: str, stream: bool) -> dict:
     編集したローカル設定 > コマンドライン引数 > 環境変数の順に優先度を揃えている。
     """
 
+    use_chat_schema = _is_chat_endpoint()
     payload = {"model": OLLAMA_MODEL}
     payload_options = {}
     if OLLAMA_PAYLOAD_OVERRIDES:
@@ -43,10 +69,7 @@ def _build_payload(prompt: str, system: str, stream: bool) -> dict:
             # payload 側で options を内包する場合はここで退避させ、後段でマージする。
             payload_options = base.pop("options")
         payload.update(base)
-    payload["prompt"] = prompt
     payload["stream"] = stream
-    if system:
-        payload["system"] = system
     options = {}
     if isinstance(payload_options, dict):
         # payload 側で宣言された options をベースにする。VSCodeテンプレートや環境変数からの上書きを許可。
@@ -57,6 +80,27 @@ def _build_payload(prompt: str, system: str, stream: bool) -> dict:
         options.update(OLLAMA_OPTIONS)
     if options:
         payload["options"] = options
+    if use_chat_schema:
+        # /api/chat を利用する場合は messages フィールドを組み立てる。
+        # 既に payload 側で messages が指定されていれば尊重し、末尾にユーザー入力を追加する。
+        messages = payload.get("messages")
+        if not isinstance(messages, list):
+            messages = []
+        # system プロンプトは先頭に1件だけ挿入する。既に system ロールがあれば重複を避ける。
+        if system and not any(m.get("role") == "system" for m in messages if isinstance(m, dict)):
+            messages.insert(0, {"role": "system", "content": system})
+        # ユーザー入力は常に末尾に追加する。既存の履歴があっても最新発話として扱える。
+        messages.append({"role": "user", "content": prompt})
+        payload["messages"] = messages
+        # chat schema では prompt/system はトップレベルで利用しないため削除して公式仕様に合わせる。
+        payload.pop("prompt", None)
+        payload.pop("system", None)
+    else:
+        payload["prompt"] = prompt
+        if system:
+            payload["system"] = system
+        else:
+            payload.pop("system", None)
     return payload
 
 def _resolve_generate_url() -> str:
@@ -85,7 +129,7 @@ def _raise_with_hint(response: requests.Response, payload: dict):
         ]
         if response.status_code == 404:
             hint.append(
-                "エンドポイントが存在しない可能性があります。" \
+                "エンドポイントが存在しない可能性があります。\n"
                 "OLLAMA_HOST や OLLAMA_GENERATE_PATH を見直してください。"
             )
         elif response.status_code == 401:
@@ -104,7 +148,7 @@ def generate(prompt: str, system: str = "") -> str:
     r = requests.post(url, json=payload, timeout=120)
     _raise_with_hint(r, payload)
     data = r.json()
-    return data.get("response", "")
+    return _extract_response_text(data)
 
 def stream(prompt: str, system: str = "") -> Iterable[str]:
     url = _resolve_generate_url()
@@ -121,8 +165,9 @@ def stream(prompt: str, system: str = "") -> Iterable[str]:
             except json.JSONDecodeError:
                 # まれに空行やJSON以外の文字列が混ざるため、例外は握りつぶして次へ。
                 continue
-            if "response" in obj:
-                buf += obj["response"]
+            chunk = _extract_response_text(obj)
+            if chunk:
+                buf += chunk
                 parts = re.split(r"([。！？])", buf)
                 for i in range(0, len(parts)-1, 2):
                     sent = (parts[i] + parts[i+1]).strip()

@@ -45,6 +45,8 @@ args = ap.parse_args()
 #   - images: 画像入力を伴うモデル向けのバイナリ列 (Base64)。
 #   - raw / template: プロンプトテンプレートを直接制御したい場合に使用。
 #   - endpoint: OLLAMA_GENERATE_PATH 環境変数で /api/chat など別エンドポイントを指すことも可能。
+#     /api/chat を選ぶと自動的に messages 形式へ変換され、system/user ロールを組み立てる。
+#   - messages: 既に過去対話の履歴があればここに格納可能。末尾に今回の user 発話を自動追加する。
 #
 #   LOCAL_OLLAMA_PAYLOAD = {
 #       "keep_alive": "10m",  # モデルを10分間キャッシュしてウォームスタート化

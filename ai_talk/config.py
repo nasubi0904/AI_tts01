@@ -43,7 +43,7 @@ def _normalize_api_path(path: str, default: str = "/api/generate") -> str:
     return trimmed.rstrip("/") or default
 
 # 404 対策として generate 用エンドポイントを環境変数で切り替え可能にする。
-# OLLAMA_GENERATE_PATH="/api/chat" のように指定すればホストを変えずにエンドポイントだけ差し替えられる。
+# OLLAMA_GENERATE_PATH="/api/chat" のように指定すると llm_client 側で chat payload に自動変換される。
 OLLAMA_GENERATE_PATH = _normalize_api_path(os.getenv("OLLAMA_GENERATE_PATH", "/api/generate"))
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1")
 # 速度調整に使う Ollama options をJSON文字列で渡せる
