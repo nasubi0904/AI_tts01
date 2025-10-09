@@ -48,7 +48,10 @@ OLLAMA_GENERATE_PATH = _normalize_api_path(os.getenv("OLLAMA_GENERATE_PATH", "/a
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1")
 # 速度調整に使う Ollama options をJSON文字列で渡せる
 # 例: OLLAMA_OPTIONS_JSON={"num_predict":128,"temperature":0.6}
+
 # エンドポイントを /api/chat などに切り替えたい場合は OLLAMA_GENERATE_PATH を設定する。
+
+main
 
 def _load_json_env(key: str) -> dict:
     """環境変数に格納されたJSON文字列を辞書として読み出す。

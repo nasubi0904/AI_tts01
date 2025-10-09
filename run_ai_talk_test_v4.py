@@ -19,7 +19,6 @@ ap.add_argument("--model", default="", help="Ollamaモデル名を一時上書�
 ap.add_argument("--host", default="", help="OllamaホストURLを一時上書き")
 ap.add_argument("--options", default="", help="OLLAMA_OPTIONS_JSON を一時上書き (JSON文字列)")
 ap.add_argument("--payload", default="", help="OLLAMA_PAYLOAD_JSON を一時上書き (JSON文字列)")
-ap.add_argument("--endpoint", default="", help="/api/generate 以外を利用したい場合のエンドポイントURL/パス")
 ap.add_argument("--quiet", action="store_true", help="ログ最小化")
 ap.add_argument("--no-color", action="store_true", help="ANSI色を無効化")
 ap.add_argument("--inspect", action="store_true", help="Ollamaサーバー情報を取得して表示する")
@@ -45,9 +44,6 @@ args = ap.parse_args()
 #   - context: 直前会話のコンテキストID。会話継続時の高速化に有効。
 #   - images: 画像入力を伴うモデル向けのバイナリ列 (Base64)。
 #   - raw / template: プロンプトテンプレートを直接制御したい場合に使用。
-#   - endpoint: OLLAMA_GENERATE_PATH 環境変数で /api/chat など別エンドポイントを指すことも可能。
-#     /api/chat を選ぶと自動的に messages 形式へ変換され、system/user ロールを組み立てる。
-#   - messages: 既に過去対話の履歴があればここに格納可能。末尾に今回の user 発話を自動追加する。
 #
 #   LOCAL_OLLAMA_PAYLOAD = {
 #       "keep_alive": "10m",  # モデルを10分間キャッシュしてウォームスタート化
@@ -60,23 +56,14 @@ args = ap.parse_args()
 #   }
 #
 # ● 優先度の考え方
-#   1. コマンドライン引数 (--options / --payload / --endpoint)
+#   1. コマンドライン引数 (--options / --payload)
 #   2. ここで定義した LOCAL_OLLAMA_*
 #   3. .env / tts.env に記載した環境変数
 #   すべてJSONとして解釈され、辞書でなければ自動的に空辞書に戻るため安全に試行錯誤できる。
 #
-# ● 追加の診断機能
-#   - `--inspect` フラグを付けて起動すると、バージョンや利用可能モデルの一覧を取得しログ表示する。
-#   - pipeline モード以外でも `--inspect` を指定すれば、実行前に接続確認だけを行える。
-#
 # ※ JSON 文字列化の際には ensure_ascii=False を指定しているため、日本語コメントを含めても文字化けしない。
 LOCAL_OLLAMA_OPTIONS = {}
 LOCAL_OLLAMA_PAYLOAD = {}
-LOCAL_OLLAMA_ENDPOINT = ""
-
-# LOCAL_OLLAMA_ENDPOINT に "/api/chat" を代入すると、chat スキーマを利用した推論に切り替えられる。
-# 既定値の空文字列であれば .env 側の設定 (もしくは /api/generate) が使われる。
-# 例: LOCAL_OLLAMA_ENDPOINT = "/api/chat"
 
 if LOCAL_OLLAMA_OPTIONS and not args.options:
     # 環境変数を直接上書きすることで ai_talk.config の初期化ロジックに乗せる。
@@ -84,10 +71,6 @@ if LOCAL_OLLAMA_OPTIONS and not args.options:
 if LOCAL_OLLAMA_PAYLOAD and not args.payload:
     # payload 側も同様。options キーを含む場合は llm_client._build_payload がマージする。
     os.environ["OLLAMA_PAYLOAD_JSON"] = json.dumps(LOCAL_OLLAMA_PAYLOAD, ensure_ascii=False)
-if LOCAL_OLLAMA_ENDPOINT and not args.endpoint:
-    # CLIで --endpoint を指定しなかった場合に限り、ここでの簡易指定を優先する。
-    # VSCode から /api/chat と /api/generate を頻繁に切り替えたいケースに対応。
-    os.environ["OLLAMA_GENERATE_PATH"] = LOCAL_OLLAMA_ENDPOINT
 
 if args.model:
     # 一時的に別モデルを試したい時のための上書き。--options 等よりも優先度が低い。
