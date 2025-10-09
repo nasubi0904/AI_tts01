@@ -21,6 +21,7 @@ ap.add_argument("--options", default="", help="OLLAMA_OPTIONS_JSON を一時上�
 ap.add_argument("--payload", default="", help="OLLAMA_PAYLOAD_JSON を一時上書き (JSON文字列)")
 ap.add_argument("--quiet", action="store_true", help="ログ最小化")
 ap.add_argument("--no-color", action="store_true", help="ANSI色を無効化")
+ap.add_argument("--inspect", action="store_true", help="Ollamaサーバー情報を取得して表示する")
 args = ap.parse_args()
 
 # --- VSCodeなどから直接編集しやすいように、ここにデフォルトのpayload/optionsを用意する ---
@@ -76,6 +77,9 @@ if args.model:
     os.environ["OLLAMA_MODEL"] = args.model
 if args.host:
     os.environ["OLLAMA_HOST"] = args.host
+if args.endpoint:
+    # エンドポイントはフルURL/相対パスいずれも指定可能。llm_client 側で正規化する。
+    os.environ["OLLAMA_GENERATE_PATH"] = args.endpoint
 if args.options:
     # CLIから渡したJSON文字列をそのまま保存。エラー時は config 側で空辞書化される。
     os.environ["OLLAMA_OPTIONS_JSON"] = args.options
@@ -85,7 +89,8 @@ if args.payload:
 if args.no_color:
     os.environ["NO_COLOR"] = "1"
 
-from ai_talk.config import VOICEVOX_URL, OLLAMA_HOST, OLLAMA_MODEL
+from ai_talk.config import VOICEVOX_URL, OLLAMA_HOST, OLLAMA_MODEL, OLLAMA_GENERATE_PATH
+from ai_talk.llm_client import describe_server
 from ai_talk.logger import setup, log, Reporter
 
 def _ping(url, path):
@@ -95,6 +100,35 @@ def _ping(url, path):
         return r.ok
     except Exception:
         return False
+
+
+def show_ollama_diagnostics(*, force_refresh: bool = False):
+    """Ollama サーバーの現在状況をログに出力する。"""
+
+    info = describe_server(force_refresh=force_refresh)
+    log(
+        "INFO",
+        "Ollama診断: "
+        f"host={info.get('host')} endpoint={info.get('endpoint')} checked_at={info.get('checked_at')}",
+    )
+    if info.get("reachable"):
+        version = info.get("version") or "(バージョン情報なし)"
+        models = info.get("models") or []
+        if models:
+            listed = ", ".join(models[:6])
+            if len(models) > 6:
+                listed += f" ... (+{len(models) - 6}件)"
+        else:
+            listed = "(登録モデルなし)"
+        log("INFO", f"  version={version}")
+        log("INFO", f"  models={listed}")
+    else:
+        log("ERR", "  Ollamaサーバーに接続できませんでした。--host や --endpoint を確認してください。")
+    if info.get("version_error"):
+        log("ERR", f"  version_error={info['version_error']}")
+    if info.get("models_error"):
+        log("ERR", f"  models_error={info['models_error']}")
+    return info
 
 def run_tts(text: str):
     from ai_talk.tts_voicevox import synthesize
@@ -110,7 +144,11 @@ def run_tts(text: str):
 def run_pipeline(initial_prompt: str):
     from ai_talk.pipeline import TalkPipeline
     setup(verbose=not args.quiet, color=not args.no_color)
-    log("INFO", f"VOICEVOX={VOICEVOX_URL}  OLLAMA={OLLAMA_HOST}  MODEL={OLLAMA_MODEL}")
+    log(
+        "INFO",
+        f"VOICEVOX={VOICEVOX_URL}  OLLAMA={OLLAMA_HOST}  ENDPOINT={OLLAMA_GENERATE_PATH}  MODEL={OLLAMA_MODEL}",
+    )
+    show_ollama_diagnostics(force_refresh=args.inspect)
     rep = Reporter()
     tp = TalkPipeline(system_prompt="日本語で簡潔に答える。", reporter=rep)
     try:
@@ -138,6 +176,10 @@ def run_asr(vosk_model_path: str):
     asr_demo(vosk_model_path)
 
 if __name__ == "__main__":
+    if args.inspect and args.mode != "pipeline":
+        # pipeline モードでは run_pipeline 内で詳細を表示するため、ここでは重複回避。
+        setup(verbose=not args.quiet, color=not args.no_color)
+        show_ollama_diagnostics(force_refresh=True)
     if args.mode=="tts":
         run_tts(args.text)
     elif args.mode=="pipeline":

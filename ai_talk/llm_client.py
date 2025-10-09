@@ -1,18 +1,21 @@
 
 """
 Ollama クライアント。ストリーミングを文単位で yield。
+
+エンドポイントの切替や診断情報の取得など、Ollama サーバーに関する
+補助的な機能もここで一元管理する。
 """
-import requests, json, re
+import requests, json, re, time
 from typing import Iterable
 from copy import deepcopy
+
+main
 from .config import (
     OLLAMA_HOST,
     OLLAMA_MODEL,
     OLLAMA_OPTIONS,
     OLLAMA_PAYLOAD_OVERRIDES,
-)
-
-
+main
 def _build_payload(prompt: str, system: str, stream: bool) -> dict:
     """Ollamaへ送るpayloadを組み立てる。
 
@@ -29,6 +32,7 @@ def _build_payload(prompt: str, system: str, stream: bool) -> dict:
     取り込み、最後に OLLAMA_OPTIONS_JSON の値で上書きする。これにより VSCode で
     編集したローカル設定 > コマンドライン引数 > 環境変数の順に優先度を揃えている。
     """
+
 
     payload = {"model": OLLAMA_MODEL}
     payload_options = {}
@@ -65,7 +69,7 @@ def generate(prompt: str, system: str = "") -> str:
     r = requests.post(url, json=payload, timeout=120)
     r.raise_for_status()
     data = r.json()
-    return data.get("response", "")
+    return _extract_response_text(data)
 
 def stream(prompt: str, system: str = "") -> Iterable[str]:
     url = f"{OLLAMA_HOST}/api/generate"
@@ -82,8 +86,9 @@ def stream(prompt: str, system: str = "") -> Iterable[str]:
             except json.JSONDecodeError:
                 # まれに空行やJSON以外の文字列が混ざるため、例外は握りつぶして次へ。
                 continue
-            if "response" in obj:
-                buf += obj["response"]
+            chunk = _extract_response_text(obj)
+            if chunk:
+                buf += chunk
                 parts = re.split(r"([。！？])", buf)
                 for i in range(0, len(parts)-1, 2):
                     sent = (parts[i] + parts[i+1]).strip()

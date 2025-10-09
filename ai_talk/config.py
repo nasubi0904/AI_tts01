@@ -24,9 +24,34 @@ VOICEVOX_URL = os.getenv("VOICEVOX_URL", "http://127.0.0.1:50021").rstrip("/")
 VOICEVOX_SPEAKER_ID = int(os.getenv("VOICEVOX_SPEAKER_ID", "1"))
 
 OLLAMA_HOST = _normalize_host(os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434"))
+
+def _normalize_api_path(path: str, default: str = "/api/generate") -> str:
+    """Ollama の API パスを正規化する。
+
+    - 絶対URL (http://...) が指定された場合はそのまま利用する。
+    - 相対パスの場合は必ず先頭を '/' に揃え、末尾のスラッシュを除去する。
+    - 空文字列の場合は default (既定は /api/generate) を返す。
+    """
+
+    if not path:
+        return default
+    trimmed = path.strip()
+    if trimmed.startswith("http://") or trimmed.startswith("https://"):
+        return trimmed.rstrip("/")
+    if not trimmed.startswith("/"):
+        trimmed = "/" + trimmed
+    return trimmed.rstrip("/") or default
+
+# 404 対策として generate 用エンドポイントを環境変数で切り替え可能にする。
+# OLLAMA_GENERATE_PATH="/api/chat" のように指定すると llm_client 側で chat payload に自動変換される。
+OLLAMA_GENERATE_PATH = _normalize_api_path(os.getenv("OLLAMA_GENERATE_PATH", "/api/generate"))
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1")
 # 速度調整に使う Ollama options をJSON文字列で渡せる
 # 例: OLLAMA_OPTIONS_JSON={"num_predict":128,"temperature":0.6}
+
+# エンドポイントを /api/chat などに切り替えたい場合は OLLAMA_GENERATE_PATH を設定する。
+
+main
 
 def _load_json_env(key: str) -> dict:
     """環境変数に格納されたJSON文字列を辞書として読み出す。
