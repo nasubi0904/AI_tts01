@@ -7,7 +7,8 @@ ASR→LLM→TTS→PLAY の直列パイプライン。
 import threading, queue, traceback
 from .audio_player import AudioPlayer
 from .tts_voicevox import synthesize as tts_synth
-from .llm_client import stream as llm_stream
+from .llm_client import stream as llm_stream, describe_server
+from .config import OLLAMA_MODEL
 from .logger import Reporter, log
 
 class TalkPipeline:
@@ -22,6 +23,23 @@ class TalkPipeline:
         self._tts_thr = threading.Thread(target=self._tts_worker, daemon=True)
         self._llm_thr.start()
         self._tts_thr.start()
+        # LLM 起動直後にサーバー情報を記録しておくと、接続不良時に原因特定が容易になる。
+        info = describe_server()
+        if info.get("reachable"):
+            version = info.get("version") or "(不明)"
+            models = info.get("models") or []
+            summary = ", ".join(models[:3]) if models else "(モデル不明)"
+            if len(models) > 3:
+                summary += f" ... (+{len(models)-3}件)"
+            log("INFO", f"Ollama接続確認 version={version} models={summary}")
+            if models and OLLAMA_MODEL not in models:
+                log(
+                    "WARN",
+                    "現在の OLLAMA_MODEL がサーバー上に見つかりません。"\
+                    f" 直近の 404 はモデル未取得が原因の可能性があります。model={OLLAMA_MODEL}",
+                )
+        else:
+            log("ERR", "Ollamaサーバーに接続できません。環境変数やエンドポイントを再確認してください。")
 
     def push_user_text(self, text: str):
         text = (text or "").strip()
