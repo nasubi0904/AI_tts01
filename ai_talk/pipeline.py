@@ -8,6 +8,7 @@ import threading, queue, traceback
 from .audio_player import AudioPlayer
 from .tts_voicevox import synthesize as tts_synth
 from .llm_client import stream as llm_stream, describe_server
+from .config import OLLAMA_MODEL
 from .logger import Reporter, log
 
 class TalkPipeline:
@@ -31,6 +32,12 @@ class TalkPipeline:
             if len(models) > 3:
                 summary += f" ... (+{len(models)-3}件)"
             log("INFO", f"Ollama接続確認 version={version} models={summary}")
+            if models and OLLAMA_MODEL not in models:
+                log(
+                    "WARN",
+                    "現在の OLLAMA_MODEL がサーバー上に見つかりません。"\
+                    f" 直近の 404 はモデル未取得が原因の可能性があります。model={OLLAMA_MODEL}",
+                )
         else:
             log("ERR", "Ollamaサーバーに接続できません。環境変数やエンドポイントを再確認してください。")
 

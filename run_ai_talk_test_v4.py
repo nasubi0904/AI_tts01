@@ -139,6 +139,12 @@ def show_ollama_diagnostics(*, force_refresh: bool = False):
             listed = "(登録モデルなし)"
         log("INFO", f"  version={version}")
         log("INFO", f"  models={listed}")
+        if models and OLLAMA_MODEL not in models:
+            log(
+                "WARN",
+                f"  選択中の OLLAMA_MODEL が現在のサーバーで確認できません。 `ollama run {OLLAMA_MODEL}` "
+                "などで事前に pull されているか確認してください。",
+            )
     else:
         log("ERR", "  Ollamaサーバーに接続できませんでした。--host や --endpoint を確認してください。")
     if info.get("version_error"):

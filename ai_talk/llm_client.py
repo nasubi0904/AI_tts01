@@ -65,6 +65,38 @@ def _endpoint_candidates() -> List[Tuple[str, bool | None]]:
     return candidates
 
 
+def _extract_error_message(response: requests.Response) -> str:
+    """エラーレスポンス内のメッセージを抽出する。"""
+
+    try:
+        data = response.json()
+    except ValueError:
+        return response.text[:200]
+
+    if isinstance(data, dict):
+        for key in ("error", "message", "detail"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+    return response.text[:200]
+
+
+def _is_model_missing(response: requests.Response) -> Tuple[bool, str]:
+    """404 がモデル未取得に起因するかどうかを判定する。"""
+
+    if response.status_code != 404:
+        return False, ""
+
+    message = _extract_error_message(response)
+    lowered = message.lower()
+    # Ollama 公式実装では、存在しないモデルを指定した際に
+    # "model 'xxx' not found" と返すため、それらの文言を検知する。
+    keywords = ["model", "not found"]
+    if all(word in lowered for word in keywords):
+        return True, message
+    return False, message
+
+
 def _extract_response_text(data: dict) -> str:
     """generate/chat 双方のレスポンスからテキスト部分のみを取り出す。"""
 
@@ -165,7 +197,12 @@ def _resolve_host_path(path: str) -> str:
     return urljoin(OLLAMA_HOST + "/", path.lstrip("/"))
 
 
-def _raise_with_hint(response: requests.Response, payload: dict):
+def _raise_with_hint(
+    response: requests.Response,
+    payload: dict,
+    *,
+    error_message: str | None = None,
+):
     """HTTPエラー時に接続設定の見直しポイントを添えて例外を投げ直す。"""
 
     try:
@@ -176,9 +213,11 @@ def _raise_with_hint(response: requests.Response, payload: dict):
             f"URL={response.request.url}",
         ]
         if response.status_code == 404:
+            if error_message:
+                hint.append(f"サーバーからの応答: {error_message}")
             hint.append(
-                "エンドポイントが存在しない可能性があります。\n"
-                "OLLAMA_HOST や OLLAMA_GENERATE_PATH を見直してください。"
+                "エンドポイントが存在しない、もしくは指定モデルが未ダウンロードの可能性があります。\n"
+                "OLLAMA_HOST / OLLAMA_GENERATE_PATH / OLLAMA_MODEL を見直してください。"
             )
         elif response.status_code == 401:
             hint.append("認証が必要な環境の場合はトークン設定を確認してください。")
@@ -248,13 +287,15 @@ def generate(prompt: str, system: str = "") -> str:
     for idx, (url, force_chat) in enumerate(candidates):
         payload = _build_payload(prompt, system, stream=False, force_chat=force_chat)
         with _session_post(url, payload, stream=False, timeout=120) as response:
+            missing_model, message = _is_model_missing(response)
             try:
-                _raise_with_hint(response, payload)
+                _raise_with_hint(response, payload, error_message=message if message else None)
             except requests.HTTPError as exc:
                 last_error = exc
                 if (
                     exc.response is not None
                     and exc.response.status_code == 404
+                    and not missing_model
                     and idx + 1 < len(candidates)
                 ):
                     next_url = candidates[idx + 1][0]
@@ -264,6 +305,12 @@ def generate(prompt: str, system: str = "") -> str:
                         f"{next_url} へ自動切替して再試行します。",
                     )
                     continue
+                if missing_model:
+                    log(
+                        "ERR",
+                        "Ollama へ指定したモデルが存在しません。"\
+                        f" model={OLLAMA_MODEL} message={message}",
+                    )
                 raise
             data = response.json()
             return _extract_response_text(data)
@@ -279,14 +326,16 @@ def stream(prompt: str, system: str = "") -> Iterable[str]:
     for idx, (url, force_chat) in enumerate(candidates):
         payload = _build_payload(prompt, system, stream=True, force_chat=force_chat)
         response = _session_post(url, payload, stream=True, timeout=None)
+        missing_model, message = _is_model_missing(response)
         try:
-            _raise_with_hint(response, payload)
+            _raise_with_hint(response, payload, error_message=message if message else None)
         except requests.HTTPError as exc:
             response.close()
             last_error = exc
             if (
                 exc.response is not None
                 and exc.response.status_code == 404
+                and not missing_model
                 and idx + 1 < len(candidates)
             ):
                 next_url = candidates[idx + 1][0]
@@ -296,6 +345,12 @@ def stream(prompt: str, system: str = "") -> Iterable[str]:
                     f"{next_url} へ自動切替して再試行します。",
                 )
                 continue
+            if missing_model:
+                log(
+                    "ERR",
+                    "Ollama へ指定したモデルが存在しません。"\
+                    f" model={OLLAMA_MODEL} message={message}",
+                )
             raise
 
         with response:
