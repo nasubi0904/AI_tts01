@@ -3,12 +3,30 @@
 共通設定。環境変数 .env / tts.env を読み込む。
 """
 import os, json
+from pathlib import Path
 from dotenv import load_dotenv
 
-if os.path.exists("tts.env"):
-    load_dotenv("tts.env")
-if os.path.exists(".env"):
-    load_dotenv(".env")
+# Windows などでスクリプトを親ディレクトリから呼び出すと、カレントディレクトリに
+# tts.env / .env が存在しないため読み込みに失敗する。そこで `config.py` 自身の配置
+# （= ai_talk/ 配下）からリポジトリルートを逆算し、優先的にそちらを探す。
+_CONFIG_DIR = Path(__file__).resolve().parent
+_ROOT_DIR = _CONFIG_DIR.parent
+
+def _load_dotenv_safe(candidate: Path):
+    """指定パスにファイルがあれば読み込む。存在しないときは無視。"""
+
+    if candidate.exists():
+        # load_dotenv は既に設定された環境変数を上書きしないため、run_ai_talk_test_v4.py
+        # などで事前に setenv 済みの値は維持される。複数候補を順番に読み込んでも安全。
+        load_dotenv(candidate)
+
+# 1. リポジトリルート（config.py からの相対）
+_load_dotenv_safe(_ROOT_DIR / "tts.env")
+_load_dotenv_safe(_ROOT_DIR / ".env")
+
+# 2. カレントディレクトリ直下（従来の挙動を維持）
+_load_dotenv_safe(Path("tts.env"))
+_load_dotenv_safe(Path(".env"))
 
 def _normalize_host(url: str) -> str:
     if not url:

@@ -78,13 +78,17 @@ LOCAL_OLLAMA_ENDPOINT = ""
 # 既定値の空文字列であれば .env 側の設定 (もしくは /api/generate) が使われる。
 # 例: LOCAL_OLLAMA_ENDPOINT = "/api/chat"
 
+# 以前のバージョンのスクリプトから import された場合でも AttributeError にならないよう、
+# getattr で安全に取得しておく。旧版では --endpoint が存在しないため空文字に倒す。
+endpoint_arg = getattr(args, "endpoint", "")
+
 if LOCAL_OLLAMA_OPTIONS and not args.options:
     # 環境変数を直接上書きすることで ai_talk.config の初期化ロジックに乗せる。
     os.environ["OLLAMA_OPTIONS_JSON"] = json.dumps(LOCAL_OLLAMA_OPTIONS, ensure_ascii=False)
 if LOCAL_OLLAMA_PAYLOAD and not args.payload:
     # payload 側も同様。options キーを含む場合は llm_client._build_payload がマージする。
     os.environ["OLLAMA_PAYLOAD_JSON"] = json.dumps(LOCAL_OLLAMA_PAYLOAD, ensure_ascii=False)
-if LOCAL_OLLAMA_ENDPOINT and not args.endpoint:
+if LOCAL_OLLAMA_ENDPOINT and not endpoint_arg:
     # CLIで --endpoint を指定しなかった場合に限り、ここでの簡易指定を優先する。
     # VSCode から /api/chat と /api/generate を頻繁に切り替えたいケースに対応。
     os.environ["OLLAMA_GENERATE_PATH"] = LOCAL_OLLAMA_ENDPOINT
@@ -94,9 +98,9 @@ if args.model:
     os.environ["OLLAMA_MODEL"] = args.model
 if args.host:
     os.environ["OLLAMA_HOST"] = args.host
-if args.endpoint:
+if endpoint_arg:
     # エンドポイントはフルURL/相対パスいずれも指定可能。llm_client 側で正規化する。
-    os.environ["OLLAMA_GENERATE_PATH"] = args.endpoint
+    os.environ["OLLAMA_GENERATE_PATH"] = endpoint_arg
 if args.options:
     # CLIから渡したJSON文字列をそのまま保存。エラー時は config 側で空辞書化される。
     os.environ["OLLAMA_OPTIONS_JSON"] = args.options
