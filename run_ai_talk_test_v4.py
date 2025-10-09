@@ -59,7 +59,7 @@ args = ap.parse_args()
 #   }
 #
 # ● 優先度の考え方
-#   1. コマンドライン引数 (--options / --payload)
+#   1. コマンドライン引数 (--options / --payload / --endpoint)
 #   2. ここで定義した LOCAL_OLLAMA_*
 #   3. .env / tts.env に記載した環境変数
 #   すべてJSONとして解釈され、辞書でなければ自動的に空辞書に戻るため安全に試行錯誤できる。
@@ -67,6 +67,11 @@ args = ap.parse_args()
 # ※ JSON 文字列化の際には ensure_ascii=False を指定しているため、日本語コメントを含めても文字化けしない。
 LOCAL_OLLAMA_OPTIONS = {}
 LOCAL_OLLAMA_PAYLOAD = {}
+LOCAL_OLLAMA_ENDPOINT = ""
+
+# LOCAL_OLLAMA_ENDPOINT に "/api/chat" を代入すると、chat スキーマを利用した推論に切り替えられる。
+# 既定値の空文字列であれば .env 側の設定 (もしくは /api/generate) が使われる。
+# 例: LOCAL_OLLAMA_ENDPOINT = "/api/chat"
 
 if LOCAL_OLLAMA_OPTIONS and not args.options:
     # 環境変数を直接上書きすることで ai_talk.config の初期化ロジックに乗せる。
@@ -74,6 +79,10 @@ if LOCAL_OLLAMA_OPTIONS and not args.options:
 if LOCAL_OLLAMA_PAYLOAD and not args.payload:
     # payload 側も同様。options キーを含む場合は llm_client._build_payload がマージする。
     os.environ["OLLAMA_PAYLOAD_JSON"] = json.dumps(LOCAL_OLLAMA_PAYLOAD, ensure_ascii=False)
+if LOCAL_OLLAMA_ENDPOINT and not args.endpoint:
+    # CLIで --endpoint を指定しなかった場合に限り、ここでの簡易指定を優先する。
+    # VSCode から /api/chat と /api/generate を頻繁に切り替えたいケースに対応。
+    os.environ["OLLAMA_GENERATE_PATH"] = LOCAL_OLLAMA_ENDPOINT
 
 if args.model:
     # 一時的に別モデルを試したい時のための上書き。--options 等よりも優先度が低い。
