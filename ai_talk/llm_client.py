@@ -1,11 +1,16 @@
 
 """
 Ollama クライアント。ストリーミングを文単位で yield。
+
+エンドポイントの切替や診断情報の取得など、Ollama サーバーに関する
+補助的な機能もここで一元管理する。
 """
-import requests, json, re
+import requests, json, re, time
 from typing import Iterable
 from copy import deepcopy
 from urllib.parse import urljoin, urlparse
+from requests import Session
+from requests.exceptions import RequestException
 from .config import (
     OLLAMA_HOST,
     OLLAMA_MODEL,
@@ -13,6 +18,28 @@ from .config import (
     OLLAMA_PAYLOAD_OVERRIDES,
     OLLAMA_GENERATE_PATH,
 )
+
+
+# ---- HTTP セッションの共有と診断キャッシュ -------------------------------------------
+#
+# 毎回 requests.post を呼び出すと TCP コネクションが張り直され、推論待ちのたびに
+# 遅延が増えることがある。Session を共有することで Keep-Alive を活用し、応答の
+# 安定化と効率化を図る。同時にサーバー診断情報のキャッシュも管理する。
+_SESSION = Session()
+_SERVER_CACHE: dict[str, object] | None = None
+
+
+def _session_post(url: str, payload: dict, *, stream: bool, timeout: float):
+    """Session を介した POST リクエスト。"""
+
+    return _SESSION.post(url, json=payload, stream=stream, timeout=timeout)
+
+
+def _session_get(url: str, *, timeout: float):
+    """診断情報取得用の GET リクエスト。"""
+
+    return _SESSION.get(url, timeout=timeout)
+
 
 
 def _is_chat_endpoint() -> bool:
@@ -117,6 +144,14 @@ def _resolve_generate_url() -> str:
     return urljoin(OLLAMA_HOST + "/", OLLAMA_GENERATE_PATH.lstrip("/"))
 
 
+def _resolve_host_path(path: str) -> str:
+    """ホストURLと任意のパスを結合するユーティリティ。"""
+
+    if path.startswith("http://") or path.startswith("https://"):
+        return path
+    return urljoin(OLLAMA_HOST + "/", path.lstrip("/"))
+
+
 def _raise_with_hint(response: requests.Response, payload: dict):
     """HTTPエラー時に接続設定の見直しポイントを添えて例外を投げ直す。"""
 
@@ -140,12 +175,65 @@ def _raise_with_hint(response: requests.Response, payload: dict):
         raise requests.HTTPError("\n".join([str(exc)] + hint), response=response) from None
 
 
+def describe_server(*, force_refresh: bool = False, timeout: float = 3.0) -> dict:
+    """Ollama サーバーのバージョンやモデル一覧を収集する。"""
+
+    global _SERVER_CACHE
+    if not force_refresh and _SERVER_CACHE is not None:
+        return _SERVER_CACHE
+
+    info: dict[str, object] = {
+        "host": OLLAMA_HOST,
+        "endpoint": _resolve_generate_url(),
+        "reachable": False,
+        "checked_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "version": "",
+        "models": [],
+    }
+
+    version_url = _resolve_host_path("/api/version")
+    try:
+        r = _session_get(version_url, timeout=timeout)
+        if r.ok:
+            data = r.json()
+            if isinstance(data, dict) and isinstance(data.get("version"), str):
+                info["version"] = data["version"]
+            info["reachable"] = True
+        else:
+            info["version_error"] = f"status={r.status_code} body={r.text[:120]}"
+    except RequestException as exc:
+        info["version_error"] = str(exc)
+
+    tags_url = _resolve_host_path("/api/tags")
+    try:
+        r = _session_get(tags_url, timeout=timeout)
+        if r.ok:
+            data = r.json()
+            if isinstance(data, dict) and isinstance(data.get("models"), list):
+                names: list[str] = []
+                for model in data["models"]:
+                    if isinstance(model, dict):
+                        name = model.get("name")
+                        if isinstance(name, str):
+                            names.append(name)
+                if names:
+                    info["models"] = names
+                    info["reachable"] = True
+        else:
+            info["models_error"] = f"status={r.status_code}"
+    except RequestException as exc:
+        info["models_error"] = str(exc)
+
+    _SERVER_CACHE = info
+    return info
+
+
 def generate(prompt: str, system: str = "") -> str:
     url = _resolve_generate_url()
     payload = _build_payload(prompt, system, stream=False)
     # タイムアウトは 120 秒。短すぎると長い応答で落ちる可能性があるため、
     # デフォルト値より長めに設定している。
-    r = requests.post(url, json=payload, timeout=120)
+    r = _session_post(url, payload, stream=False, timeout=120)
     _raise_with_hint(r, payload)
     data = r.json()
     return _extract_response_text(data)
@@ -154,7 +242,7 @@ def stream(prompt: str, system: str = "") -> Iterable[str]:
     url = _resolve_generate_url()
     payload = _build_payload(prompt, system, stream=True)
     # stream=True で逐次受信し、timeout=None にして推論終了まで接続を維持する。
-    with requests.post(url, json=payload, stream=True, timeout=None) as r:
+    with _session_post(url, payload, stream=True, timeout=None) as r:
         _raise_with_hint(r, payload)
         buf = ""
         for line in r.iter_lines(decode_unicode=True):
