@@ -1,36 +1,39 @@
+"""Ollama クライアント。低遅延ストリーミングと診断機能を提供する。"""
 
-"""
-Ollama クライアント。ストリーミングを文単位で yield。
+from __future__ import annotations
 
-エンドポイントの切替や診断情報の取得など、Ollama サーバーに関する
-補助的な機能もここで一元管理する。
-"""
-import requests, json, re, time
-from typing import Iterable, List, Tuple
+import json
+import re
+import time
 from copy import deepcopy
+from typing import Iterable, List, Tuple
 from urllib.parse import urljoin, urlparse
+
+import requests
 from requests import Session
+from requests.adapters import HTTPAdapter
 from requests.exceptions import RequestException
+
 from .config import (
+    OLLAMA_GENERATE_PATH,
     OLLAMA_HOST,
     OLLAMA_MODEL,
     OLLAMA_OPTIONS,
     OLLAMA_PAYLOAD_OVERRIDES,
-    OLLAMA_GENERATE_PATH,
 )
 from .logger import log
 
 
-# ---- HTTP セッションの共有と診断キャッシュ -------------------------------------------
-#
-# 毎回 requests.post を呼び出すと TCP コネクションが張り直され、推論待ちのたびに
-# 遅延が増えることがある。Session を共有することで Keep-Alive を活用し、応答の
-# 安定化と効率化を図る。同時にサーバー診断情報のキャッシュも管理する。
+# ---- HTTP セッション共有と診断キャッシュ --------------------------------------------
 _SESSION = Session()
+_SESSION.headers.update({"Accept": "application/json"})
+_SESSION.mount("http://", HTTPAdapter(pool_connections=4, pool_maxsize=8))
+_SESSION.mount("https://", HTTPAdapter(pool_connections=4, pool_maxsize=8))
 _SERVER_CACHE: dict[str, object] | None = None
+_SENTENCE_BOUNDARY = re.compile(r"(.+?[。！？])")
 
 
-def _session_post(url: str, payload: dict, *, stream: bool, timeout: float):
+def _session_post(url: str, payload: dict, *, stream: bool, timeout: float | None):
     """Session を介した POST リクエスト。"""
 
     return _SESSION.post(url, json=payload, stream=stream, timeout=timeout)
@@ -42,19 +45,17 @@ def _session_get(url: str, *, timeout: float):
     return _SESSION.get(url, timeout=timeout)
 
 
-
 def _is_chat_endpoint() -> bool:
     """OLLAMA_GENERATE_PATH が /api/chat 系かどうかを判定する。"""
 
     parsed = urlparse(OLLAMA_GENERATE_PATH)
-    # 相対パスの場合は path に格納される。絶対URLなら path 部分のみを見る。
     path = parsed.path or OLLAMA_GENERATE_PATH
     normalized = path.split("?", 1)[0].rstrip("/").lower()
     return normalized.endswith("/api/chat")
 
 
 def _endpoint_candidates() -> List[Tuple[str, bool | None]]:
-    """利用候補となるエンドポイントURLを列挙する。"""
+    """利用候補となるエンドポイント URL を列挙する。"""
 
     configured = _resolve_generate_url()
     candidates: List[Tuple[str, bool | None]] = [(configured, None)]
@@ -89,8 +90,6 @@ def _is_model_missing(response: requests.Response) -> Tuple[bool, str]:
 
     message = _extract_error_message(response)
     lowered = message.lower()
-    # Ollama 公式実装では、存在しないモデルを指定した際に
-    # "model 'xxx' not found" と返すため、それらの文言を検知する。
     keywords = ["model", "not found"]
     if all(word in lowered for word in keywords):
         return True, message
@@ -112,59 +111,39 @@ def _extract_response_text(data: dict) -> str:
     return ""
 
 
-def _build_payload(prompt: str, system: str, stream: bool, *, force_chat: bool | None = None) -> dict:
-    """Ollamaへ送るpayloadを組み立てる。
-
-    payloadに含められる主な項目は以下の通り。
-    - model: 使用するモデル名。環境変数 OLLAMA_MODEL で管理。
-    - prompt: ユーザー入力。文字列。
-    - system: システムプロンプト。空文字列の場合は送らない。
-    - stream: ストリーミング応答を希望するかどうかの真偽値。
-    - options: パラメータ辞書。num_predict, temperature などを指定可能。
-    - そのほか keep_alive や format など、Ollama公式ドキュメントで定義される
-      任意のキーを OLLAMA_PAYLOAD_JSON 側で追加できる。
-
-    OLLAMA_PAYLOAD_JSON に {"options": {...}} を含めた場合は options の初期値に
-    取り込み、最後に OLLAMA_OPTIONS_JSON の値で上書きする。これにより VSCode で
-    編集したローカル設定 > コマンドライン引数 > 環境変数の順に優先度を揃えている。
-    """
+def _build_payload(
+    prompt: str,
+    system: str,
+    stream: bool,
+    *,
+    force_chat: bool | None = None,
+) -> dict:
+    """Ollama へ送る payload を組み立てる。"""
 
     use_chat_schema = _is_chat_endpoint() if force_chat is None else force_chat
     payload = {"model": OLLAMA_MODEL}
     payload_options = {}
     if OLLAMA_PAYLOAD_OVERRIDES:
-        # deepcopy してから操作することで、設定を複数回利用しても副作用が出ないようにする。
-        # 公式仕様にある top-level キー (model/prompt/system/options など) 以外もそのまま残す。
-        # 例: {"keep_alive":"5m","format":"json"} を設定すればAPIリクエストに反映される。
         base = deepcopy(OLLAMA_PAYLOAD_OVERRIDES)
         if isinstance(base.get("options"), dict):
-            # payload 側で options を内包する場合はここで退避させ、後段でマージする。
             payload_options = base.pop("options")
         payload.update(base)
     payload["stream"] = stream
     options = {}
     if isinstance(payload_options, dict):
-        # payload 側で宣言された options をベースにする。VSCodeテンプレートや環境変数からの上書きを許可。
         options.update(payload_options)
     if OLLAMA_OPTIONS:
-        # OLLAMA_OPTIONS_JSON (もしくは --options 引数) を最終上書きとして適用する。
-        # 例えば CLI で {"num_predict":64} を渡せば、payload テンプレート側の値より優先される。
         options.update(OLLAMA_OPTIONS)
     if options:
         payload["options"] = options
     if use_chat_schema:
-        # /api/chat を利用する場合は messages フィールドを組み立てる。
-        # 既に payload 側で messages が指定されていれば尊重し、末尾にユーザー入力を追加する。
         messages = payload.get("messages")
         if not isinstance(messages, list):
             messages = []
-        # system プロンプトは先頭に1件だけ挿入する。既に system ロールがあれば重複を避ける。
-        if system and not any(m.get("role") == "system" for m in messages if isinstance(m, dict)):
+        if system and not any(isinstance(m, dict) and m.get("role") == "system" for m in messages):
             messages.insert(0, {"role": "system", "content": system})
-        # ユーザー入力は常に末尾に追加する。既存の履歴があっても最新発話として扱える。
         messages.append({"role": "user", "content": prompt})
         payload["messages"] = messages
-        # chat schema では prompt/system はトップレベルで利用しないため削除して公式仕様に合わせる。
         payload.pop("prompt", None)
         payload.pop("system", None)
     else:
@@ -175,23 +154,14 @@ def _build_payload(prompt: str, system: str, stream: bool, *, force_chat: bool |
             payload.pop("system", None)
     return payload
 
+
 def _resolve_generate_url() -> str:
-    """生成APIのURLを決定する。
-
-    OLLAMA_GENERATE_PATH が絶対URLの場合はそれを優先し、相対パスの場合は
-    OLLAMA_HOST との結合結果を返す。末尾のスラッシュは除去して冗長なリクエスト
-    を避ける。
-    """
-
     if OLLAMA_GENERATE_PATH.startswith("http://") or OLLAMA_GENERATE_PATH.startswith("https://"):
         return OLLAMA_GENERATE_PATH
-    # urljoin は第二引数が '/' で始まるとルートへ張り付ける挙動を利用する。
     return urljoin(OLLAMA_HOST + "/", OLLAMA_GENERATE_PATH.lstrip("/"))
 
 
 def _resolve_host_path(path: str) -> str:
-    """ホストURLと任意のパスを結合するユーティリティ。"""
-
     if path.startswith("http://") or path.startswith("https://"):
         return path
     return urljoin(OLLAMA_HOST + "/", path.lstrip("/"))
@@ -202,9 +172,7 @@ def _raise_with_hint(
     payload: dict,
     *,
     error_message: str | None = None,
-):
-    """HTTPエラー時に接続設定の見直しポイントを添えて例外を投げ直す。"""
-
+) -> None:
     try:
         response.raise_for_status()
     except requests.HTTPError as exc:
@@ -217,7 +185,7 @@ def _raise_with_hint(
                 hint.append(f"サーバーからの応答: {error_message}")
             hint.append(
                 "エンドポイントが存在しない、もしくは指定モデルが未ダウンロードの可能性があります。\n"
-                "OLLAMA_HOST / OLLAMA_GENERATE_PATH / OLLAMA_MODEL を見直してください。"
+                "OLLAMA_HOST / OLLAMA_GENERATE_PATH / OLLAMA_MODEL を見直してください。",
             )
         elif response.status_code == 401:
             hint.append("認証が必要な環境の場合はトークン設定を確認してください。")
@@ -308,7 +276,7 @@ def generate(prompt: str, system: str = "") -> str:
                 if missing_model:
                     log(
                         "ERR",
-                        "Ollama へ指定したモデルが存在しません。"\
+                        "Ollama へ指定したモデルが存在しません。"
                         f" model={OLLAMA_MODEL} message={message}",
                     )
                 raise
@@ -318,6 +286,7 @@ def generate(prompt: str, system: str = "") -> str:
     if last_error is not None:
         raise last_error
     return ""
+
 
 def stream(prompt: str, system: str = "") -> Iterable[str]:
     candidates = _endpoint_candidates()
@@ -348,35 +317,42 @@ def stream(prompt: str, system: str = "") -> Iterable[str]:
             if missing_model:
                 log(
                     "ERR",
-                    "Ollama へ指定したモデルが存在しません。"\
+                    "Ollama へ指定したモデルが存在しません。"
                     f" model={OLLAMA_MODEL} message={message}",
                 )
             raise
 
         with response:
-            buf = ""
-            for line in response.iter_lines(decode_unicode=True):
+            buffer = ""
+            for line in response.iter_lines(decode_unicode=True, chunk_size=128):
                 if not line:
                     continue
                 try:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
-                    # まれに空行やJSON以外の文字列が混ざるため、例外は握りつぶして次へ。
                     continue
                 chunk = _extract_response_text(obj)
                 if chunk:
-                    buf += chunk
-                    parts = re.split(r"([。！？])", buf)
-                    for i in range(0, len(parts) - 1, 2):
-                        sent = (parts[i] + parts[i + 1]).strip()
-                        if sent:
-                            yield sent
-                    buf = "" if len(parts) % 2 == 0 else parts[-1]
+                    sentences, buffer = _collect_sentences(buffer + chunk)
+                    for sentence in sentences:
+                        yield sentence
                 if obj.get("done"):
-                    if buf.strip():
-                        yield buf.strip()
+                    tail = buffer.strip()
+                    if tail:
+                        yield tail
                     break
             return
 
     if last_error is not None:
         raise last_error
+
+
+def _collect_sentences(buffer: str) -> tuple[list[str], str]:
+    sentences: list[str] = []
+    last_end = 0
+    for match in _SENTENCE_BOUNDARY.finditer(buffer):
+        sentence = match.group(1).strip()
+        if sentence:
+            sentences.append(sentence)
+        last_end = match.end()
+    return sentences, buffer[last_end:]
