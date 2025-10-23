@@ -1,32 +1,64 @@
 
-"""
-VOICEVOX クライアント。WAVバイトを返す。
-"""
-import json, requests
-from .config import VOICEVOX_URL, VOICEVOX_SPEAKER_ID
+"""VOICEVOX HTTP クライアント。"""
 
-_session = requests.Session()
-_session.headers.update({"Content-Type": "application/json"})
+from __future__ import annotations
 
-def _init():
+import json
+from typing import Any
+
+import requests
+from requests.adapters import HTTPAdapter
+
+from .config import VOICEVOX_SPEAKER_ID, VOICEVOX_URL
+
+
+_SESSION = requests.Session()
+_SESSION.headers.update({"Content-Type": "application/json"})
+_SESSION.mount("http://", HTTPAdapter(pool_connections=4, pool_maxsize=8))
+_SESSION.mount("https://", HTTPAdapter(pool_connections=4, pool_maxsize=8))
+
+
+def _initialize() -> None:
     try:
-        _session.post(f"{VOICEVOX_URL}/initialize_speaker", params={"speaker": VOICEVOX_SPEAKER_ID}, timeout=3)
-    except Exception:
+        _SESSION.post(
+            f"{VOICEVOX_URL}/initialize_speaker",
+            params={"speaker": VOICEVOX_SPEAKER_ID},
+            timeout=3,
+        )
+    except Exception:  # noqa: BLE001  起動直後の初期化失敗は許容
         pass
-_init()
+
+
+_initialize()
+
 
 def synthesize(text: str) -> bytes:
     if not text:
         return b""
-    q = _session.post(f"{VOICEVOX_URL}/audio_query", params={"text": text, "speaker": VOICEVOX_SPEAKER_ID}, timeout=10)
-    q.raise_for_status()
-    query = q.json()
-    query.update({
-        "speedScale":       1.05,
-        "intonationScale":  1.0,
-        "prePhonemeLength": 0.08,
-        "postPhonemeLength":0.08
-    })
-    s = _session.post(f"{VOICEVOX_URL}/synthesis", params={"speaker": VOICEVOX_SPEAKER_ID}, data=json.dumps(query), timeout=20)
-    s.raise_for_status()
-    return s.content
+    query = _request_json(
+        "audio_query",
+        params={"text": text, "speaker": VOICEVOX_SPEAKER_ID},
+        timeout=10,
+    )
+    query.update(
+        {
+            "speedScale": 1.05,
+            "intonationScale": 1.0,
+            "prePhonemeLength": 0.08,
+            "postPhonemeLength": 0.08,
+        }
+    )
+    response = _SESSION.post(
+        f"{VOICEVOX_URL}/synthesis",
+        params={"speaker": VOICEVOX_SPEAKER_ID},
+        data=json.dumps(query),
+        timeout=20,
+    )
+    response.raise_for_status()
+    return response.content
+
+
+def _request_json(endpoint: str, *, params: dict[str, Any], timeout: float) -> dict:
+    response = _SESSION.post(f"{VOICEVOX_URL}/{endpoint}", params=params, timeout=timeout)
+    response.raise_for_status()
+    return response.json()
