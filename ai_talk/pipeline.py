@@ -68,6 +68,12 @@ class TalkPipeline:
         """初期化時に Ollama サーバーの状態を記録する。"""
 
         info = describe_server()
+        host = info.get("host", "(不明)")
+        endpoint = info.get("endpoint", "(不明)")
+        log(
+            "INFO",
+            f"Ollama接続設定 host={host} endpoint={endpoint} model={OLLAMA_MODEL}",
+        )
         if info.get("reachable"):
             version = info.get("version") or "(不明)"
             models = info.get("models") or []
