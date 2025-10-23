@@ -16,7 +16,7 @@ from collections.abc import Iterable
 
 from .audio_player import AudioPlayer
 from .config import OLLAMA_MODEL
-from .llm_client import describe_server, stream as llm_stream
+from .llm_client import OllamaChatSession, describe_server
 from .logger import Reporter, log
 from .tts_voicevox import synthesize as tts_synth
 
@@ -31,6 +31,7 @@ class TalkPipeline:
         self.reporter = reporter or Reporter()
         self.player = AudioPlayer(reporter=self.reporter)
         self.system_prompt = system_prompt
+        self._chat = OllamaChatSession(system_prompt)
         self._input_q: "queue.Queue[str | object]" = queue.Queue()
         self._tts_q: "queue.Queue[str | object]" = queue.Queue()
         self._stop = threading.Event()
@@ -127,7 +128,7 @@ class TalkPipeline:
     def _iter_sentences(self, user_text: str) -> Iterable[str]:
         """LLM ストリームから文を抽出して返す。"""
 
-        for sent in llm_stream(prompt=user_text, system=self.system_prompt):
+        for sent in self._chat.stream_sentences(user_text):
             normalized = sent.strip()
             if normalized:
                 yield normalized

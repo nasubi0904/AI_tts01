@@ -6,7 +6,8 @@ import json
 import re
 import time
 from copy import deepcopy
-from typing import Iterable, List, Tuple
+from dataclasses import dataclass, field
+from typing import Iterable, List, Sequence, Tuple
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -111,47 +112,72 @@ def _extract_response_text(data: dict) -> str:
     return ""
 
 
-def _build_payload(
-    prompt: str,
-    system: str,
-    stream: bool,
-    *,
-    force_chat: bool | None = None,
-) -> dict:
-    """Ollama へ送る payload を組み立てる。"""
+def _base_payload(*, stream: bool) -> tuple[dict, dict]:
+    """モデル名や options をマージしたベース payload を返す。"""
 
-    use_chat_schema = _is_chat_endpoint() if force_chat is None else force_chat
-    payload = {"model": OLLAMA_MODEL}
-    payload_options = {}
+    payload: dict[str, object] = {"model": OLLAMA_MODEL, "stream": stream}
+    payload_options: dict[str, object] = {}
     if OLLAMA_PAYLOAD_OVERRIDES:
         base = deepcopy(OLLAMA_PAYLOAD_OVERRIDES)
         if isinstance(base.get("options"), dict):
-            payload_options = base.pop("options")
+            payload_options = base.pop("options")  # type: ignore[assignment]
         payload.update(base)
-    payload["stream"] = stream
-    options = {}
+    options: dict[str, object] = {}
     if isinstance(payload_options, dict):
         options.update(payload_options)
     if OLLAMA_OPTIONS:
         options.update(OLLAMA_OPTIONS)
     if options:
         payload["options"] = options
+    return payload, options
+
+
+def _build_payload_from_messages(
+    messages: Sequence[dict[str, str]],
+    *,
+    stream: bool,
+    force_chat: bool | None = None,
+) -> dict:
+    """会話履歴をもとに Ollama へ送る payload を組み立てる。"""
+
+    use_chat_schema = _is_chat_endpoint() if force_chat is None else force_chat
+    payload, _ = _base_payload(stream=stream)
     if use_chat_schema:
-        messages = payload.get("messages")
-        if not isinstance(messages, list):
-            messages = []
-        if system and not any(isinstance(m, dict) and m.get("role") == "system" for m in messages):
-            messages.insert(0, {"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
-        payload["messages"] = messages
+        existing = payload.get("messages")
+        payload_messages: list[dict[str, str]] = []
+        if isinstance(existing, list):
+            payload_messages.extend(m for m in existing if isinstance(m, dict))
+        payload_messages.extend(messages)
+        payload["messages"] = payload_messages
         payload.pop("prompt", None)
         payload.pop("system", None)
-    else:
-        payload["prompt"] = prompt
-        if system:
-            payload["system"] = system
+        return payload
+
+    # generate 系にフォールバックするときはシンプルにテキストへ連結する。
+    system_text = ""
+    content_lines: list[str] = []
+    for msg in messages:
+        role = msg.get("role", "").strip().lower()
+        content = (msg.get("content") or "").strip()
+        if not content:
+            continue
+        if role == "system":
+            system_text = content
+        elif role == "user":
+            content_lines.append(f"user: {content}")
+        elif role == "assistant":
+            content_lines.append(f"assistant: {content}")
         else:
-            payload.pop("system", None)
+            content_lines.append(content)
+    if content_lines:
+        prompt_text = "\n".join(content_lines) + "\nassistant:"
+    else:
+        prompt_text = ""
+    payload["prompt"] = prompt_text
+    if system_text:
+        payload["system"] = system_text
+    else:
+        payload.pop("system", None)
     return payload
 
 
@@ -193,6 +219,106 @@ def _raise_with_hint(
             hint.append(f"status={response.status_code} body={response.text[:200]}")
         hint.append(f"payload keys={sorted(payload.keys())}")
         raise requests.HTTPError("\n".join([str(exc)] + hint), response=response) from None
+
+
+def _request_non_stream(messages: Sequence[dict[str, str]]) -> str:
+    """チャット履歴をまとめて送り、最終テキストを返す。"""
+
+    candidates = _endpoint_candidates()
+    last_error: requests.HTTPError | None = None
+
+    for idx, (url, force_chat) in enumerate(candidates):
+        payload = _build_payload_from_messages(messages, stream=False, force_chat=force_chat)
+        with _session_post(url, payload, stream=False, timeout=120) as response:
+            missing_model, message = _is_model_missing(response)
+            try:
+                _raise_with_hint(response, payload, error_message=message or None)
+            except requests.HTTPError as exc:
+                last_error = exc
+                if (
+                    exc.response is not None
+                    and exc.response.status_code == 404
+                    and not missing_model
+                    and idx + 1 < len(candidates)
+                ):
+                    next_url = candidates[idx + 1][0]
+                    log(
+                        "INFO",
+                        "OLLAMA_GENERATE_PATH が 404 を返したため "
+                        f"{next_url} へ自動切替して再試行します。",
+                    )
+                    continue
+                if missing_model:
+                    log(
+                        "ERR",
+                        "Ollama へ指定したモデルが存在しません。"
+                        f" model={OLLAMA_MODEL} message={message}",
+                    )
+                raise
+            data = response.json()
+            return _extract_response_text(data)
+
+    if last_error is not None:
+        raise last_error
+    return ""
+
+
+def _request_stream(messages: Sequence[dict[str, str]]) -> Iterable[str]:
+    """チャット履歴を送信しストリーミングでテキストを受け取る。"""
+
+    candidates = _endpoint_candidates()
+    last_error: requests.HTTPError | None = None
+
+    for idx, (url, force_chat) in enumerate(candidates):
+        payload = _build_payload_from_messages(messages, stream=True, force_chat=force_chat)
+        response = _session_post(url, payload, stream=True, timeout=None)
+        missing_model, message = _is_model_missing(response)
+        try:
+            _raise_with_hint(response, payload, error_message=message or None)
+        except requests.HTTPError as exc:
+            response.close()
+            last_error = exc
+            if (
+                exc.response is not None
+                and exc.response.status_code == 404
+                and not missing_model
+                and idx + 1 < len(candidates)
+            ):
+                next_url = candidates[idx + 1][0]
+                log(
+                    "INFO",
+                    "OLLAMA_GENERATE_PATH が 404 を返したため "
+                    f"{next_url} へ自動切替して再試行します。",
+                )
+                continue
+            if missing_model:
+                log(
+                    "ERR",
+                    "Ollama へ指定したモデルが存在しません。"
+                    f" model={OLLAMA_MODEL} message={message}",
+                )
+            raise
+
+        def _iter_lines() -> Iterable[str]:
+            with response:
+                for line in response.iter_lines(decode_unicode=True, chunk_size=128):
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    chunk = _extract_response_text(obj)
+                    if chunk:
+                        yield chunk
+                    if obj.get("done"):
+                        break
+
+        return _iter_lines()
+
+    if last_error is not None:
+        raise last_error
+    return []
 
 
 def describe_server(*, force_refresh: bool = False, timeout: float = 3.0) -> dict:
@@ -249,103 +375,109 @@ def describe_server(*, force_refresh: bool = False, timeout: float = 3.0) -> dic
 
 
 def generate(prompt: str, system: str = "") -> str:
-    candidates = _endpoint_candidates()
-    last_error: requests.HTTPError | None = None
-
-    for idx, (url, force_chat) in enumerate(candidates):
-        payload = _build_payload(prompt, system, stream=False, force_chat=force_chat)
-        with _session_post(url, payload, stream=False, timeout=120) as response:
-            missing_model, message = _is_model_missing(response)
-            try:
-                _raise_with_hint(response, payload, error_message=message if message else None)
-            except requests.HTTPError as exc:
-                last_error = exc
-                if (
-                    exc.response is not None
-                    and exc.response.status_code == 404
-                    and not missing_model
-                    and idx + 1 < len(candidates)
-                ):
-                    next_url = candidates[idx + 1][0]
-                    log(
-                        "INFO",
-                        "OLLAMA_GENERATE_PATH が 404 を返したため "
-                        f"{next_url} へ自動切替して再試行します。",
-                    )
-                    continue
-                if missing_model:
-                    log(
-                        "ERR",
-                        "Ollama へ指定したモデルが存在しません。"
-                        f" model={OLLAMA_MODEL} message={message}",
-                    )
-                raise
-            data = response.json()
-            return _extract_response_text(data)
-
-    if last_error is not None:
-        raise last_error
-    return ""
+    messages = []
+    system_text = system.strip()
+    if system_text:
+        messages.append({"role": "system", "content": system_text})
+    messages.append({"role": "user", "content": prompt})
+    return _request_non_stream(messages)
 
 
 def stream(prompt: str, system: str = "") -> Iterable[str]:
-    candidates = _endpoint_candidates()
-    last_error: requests.HTTPError | None = None
+    messages = []
+    system_text = system.strip()
+    if system_text:
+        messages.append({"role": "system", "content": system_text})
+    messages.append({"role": "user", "content": prompt})
 
-    for idx, (url, force_chat) in enumerate(candidates):
-        payload = _build_payload(prompt, system, stream=True, force_chat=force_chat)
-        response = _session_post(url, payload, stream=True, timeout=None)
-        missing_model, message = _is_model_missing(response)
-        try:
-            _raise_with_hint(response, payload, error_message=message if message else None)
-        except requests.HTTPError as exc:
-            response.close()
-            last_error = exc
-            if (
-                exc.response is not None
-                and exc.response.status_code == 404
-                and not missing_model
-                and idx + 1 < len(candidates)
-            ):
-                next_url = candidates[idx + 1][0]
-                log(
-                    "INFO",
-                    "OLLAMA_GENERATE_PATH が 404 を返したため "
-                    f"{next_url} へ自動切替して再試行します。",
-                )
-                continue
-            if missing_model:
-                log(
-                    "ERR",
-                    "Ollama へ指定したモデルが存在しません。"
-                    f" model={OLLAMA_MODEL} message={message}",
-                )
-            raise
+    buffer = ""
+    for chunk in _request_stream(messages):
+        sentences, buffer = _collect_sentences(buffer + chunk)
+        for sentence in sentences:
+            yield sentence
+    tail = buffer.strip()
+    if tail:
+        yield tail
 
-        with response:
-            buffer = ""
-            for line in response.iter_lines(decode_unicode=True, chunk_size=128):
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                chunk = _extract_response_text(obj)
-                if chunk:
-                    sentences, buffer = _collect_sentences(buffer + chunk)
-                    for sentence in sentences:
-                        yield sentence
-                if obj.get("done"):
-                    tail = buffer.strip()
-                    if tail:
-                        yield tail
-                    break
+
+@dataclass
+class OllamaChatSession:
+    """`ollama run` の会話状態を模倣するシンプルなチャットセッション。"""
+
+    system_prompt: str = ""
+    messages: list[dict[str, str]] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        system = self.system_prompt.strip()
+        if system:
+            self.messages.append({"role": "system", "content": system})
+
+    # ------------------------------------------------------------------ utils
+    def reset(self) -> None:
+        """履歴を初期化する。system プロンプトは保持する。"""
+
+        system = self.system_prompt.strip()
+        self.messages = []
+        if system:
+            self.messages.append({"role": "system", "content": system})
+
+    def _append_user(self, text: str) -> None:
+        self.messages.append({"role": "user", "content": text})
+
+    def _append_assistant(self, text: str) -> None:
+        if text.strip():
+            self.messages.append({"role": "assistant", "content": text})
+
+    # ----------------------------------------------------------------- public
+    def stream_sentences(self, user_text: str) -> Iterable[str]:
+        """ユーザー発話を追加し、応答を文単位でストリーミングする。"""
+
+        clean = user_text.strip()
+        if not clean:
             return
 
-    if last_error is not None:
-        raise last_error
+        self._append_user(clean)
 
+        buffer = ""
+        collected: list[str] = []
+        try:
+            for chunk in _request_stream(self.messages):
+                if not chunk:
+                    continue
+                collected.append(chunk)
+                sentences, buffer = _collect_sentences(buffer + chunk)
+                for sentence in sentences:
+                    yield sentence
+            tail = buffer.strip()
+            if tail:
+                collected.append(tail)
+                yield tail
+        except Exception:
+            if self.messages:
+                self.messages.pop()
+            raise
+
+        assistant_text = "".join(collected)
+        self._append_assistant(assistant_text)
+
+    def complete(self, user_text: str) -> str:
+        """ストリーミングなしで応答全文を取得する。"""
+
+        clean = user_text.strip()
+        if not clean:
+            return ""
+
+        self._append_user(clean)
+        try:
+            text = _request_non_stream(self.messages)
+        except Exception:
+            if self.messages:
+                self.messages.pop()
+            raise
+        else:
+            assistant_text = text.strip()
+            self._append_assistant(assistant_text)
+            return text
 
 def _collect_sentences(buffer: str) -> tuple[list[str], str]:
     sentences: list[str] = []
