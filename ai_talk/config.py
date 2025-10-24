@@ -2,7 +2,7 @@
 """
 共通設定。環境変数 .env / tts.env を読み込む。
 """
-import os, json
+import os, json, sys
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -43,12 +43,12 @@ VOICEVOX_SPEAKER_ID = int(os.getenv("VOICEVOX_SPEAKER_ID", "1"))
 
 OLLAMA_HOST = _normalize_host(os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434"))
 
-def _normalize_api_path(path: str, default: str = "/api/generate") -> str:
+def _normalize_api_path(path: str, default: str = "/api/chat") -> str:
     """Ollama の API パスを正規化する。
 
     - 絶対URL (http://...) が指定された場合はそのまま利用する。
     - 相対パスの場合は必ず先頭を '/' に揃え、末尾のスラッシュを除去する。
-    - 空文字列の場合は default (既定は /api/generate) を返す。
+    - 空文字列の場合は default (既定は /api/chat) を返す。
     """
 
     if not path:
@@ -60,13 +60,55 @@ def _normalize_api_path(path: str, default: str = "/api/generate") -> str:
         trimmed = "/" + trimmed
     return trimmed.rstrip("/") or default
 
+def _load_modelfile_content() -> str | None:
+    """MODELFILE に指定された Modelfile を読み込む。
+
+    - 絶対パス / 相対パス双方に対応する。
+    - 読み込みに失敗した場合は標準エラー出力へ警告を表示し、None を返す。
+    """
+
+    raw = os.getenv("MODELFILE", "").strip()
+    if not raw:
+        return None
+
+    path = Path(raw)
+    candidates: list[Path] = []
+    if path.is_absolute():
+        candidates.append(path)
+    else:
+        candidates.append(Path.cwd() / path)
+        repo_candidate = _ROOT_DIR / path
+        if repo_candidate not in candidates:
+            candidates.append(repo_candidate)
+
+    for candidate in candidates:
+        try:
+            return candidate.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            print(
+                f"MODELFILE='{raw}' の読み込みに失敗しました: {exc}",
+                file=sys.stderr,
+            )
+            return None
+
+    print(
+        f"MODELFILE='{raw}' で指定されたファイルが見つかりません。",
+        file=sys.stderr,
+    )
+    return None
+
+
 # 404 対策として generate 用エンドポイントを環境変数で切り替え可能にする。
-# OLLAMA_GENERATE_PATH="/api/chat" のように指定すると llm_client 側で chat payload に自動変換される。
-OLLAMA_GENERATE_PATH = _normalize_api_path(os.getenv("OLLAMA_GENERATE_PATH", "/api/generate"))
+# 既定値はチャットエンドポイント /api/chat。
+OLLAMA_GENERATE_PATH = _normalize_api_path(os.getenv("OLLAMA_GENERATE_PATH", "/api/chat"))
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1")
+# Ollama の modelfile を環境変数から供給する。
+OLLAMA_MODELFILE = _load_modelfile_content()
 # 速度調整に使う Ollama options をJSON文字列で渡せる
 # 例: OLLAMA_OPTIONS_JSON={"num_predict":128,"temperature":0.6}
-# エンドポイントを /api/chat などに切り替えたい場合は OLLAMA_GENERATE_PATH を設定する。
+# エンドポイントを /api/generate などに切り替えたい場合は OLLAMA_GENERATE_PATH を設定する。
 
 def _load_json_env(key: str) -> dict:
     """環境変数に格納されたJSON文字列を辞書として読み出す。

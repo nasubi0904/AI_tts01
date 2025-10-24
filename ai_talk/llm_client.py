@@ -18,6 +18,7 @@ from .config import (
     OLLAMA_GENERATE_PATH,
     OLLAMA_HOST,
     OLLAMA_MODEL,
+    OLLAMA_MODELFILE,
     OLLAMA_OPTIONS,
     OLLAMA_PAYLOAD_OVERRIDES,
 )
@@ -85,6 +86,7 @@ class OllamaSettings:
     generate_path: str
     model: str
     options: Mapping[str, object] | None = None
+    modelfile: str | None = None
     payload_overrides: Mapping[str, object] | None = None
 
     @classmethod
@@ -94,6 +96,7 @@ class OllamaSettings:
             generate_path=OLLAMA_GENERATE_PATH,
             model=OLLAMA_MODEL,
             options=OLLAMA_OPTIONS or None,
+            modelfile=OLLAMA_MODELFILE,
             payload_overrides=OLLAMA_PAYLOAD_OVERRIDES or None,
         )
 
@@ -137,6 +140,8 @@ class OllamaSettings:
             options.update(self.options)
         if options:
             payload["options"] = options
+        if self.modelfile and "modelfile" not in payload:
+            payload["modelfile"] = self.modelfile
 
         use_chat_schema = self.is_chat_endpoint() if force_chat is None else force_chat
         if use_chat_schema:
@@ -283,11 +288,20 @@ class OllamaService:
         timeout: float | None,
     ) -> Iterator[str] | str:
         candidates = self.settings.endpoint_candidates()
-        last_error: requests.HTTPError | None = None
+        last_error: Exception | None = None
 
         for idx, candidate in enumerate(candidates):
             payload = self.settings.build_payload(messages, stream=stream, force_chat=candidate.force_chat)
-            response = self.http.post(candidate.url, payload, stream=stream, timeout=timeout)
+            try:
+                response = self.http.post(candidate.url, payload, stream=stream, timeout=timeout)
+            except RequestException as exc:
+                log(
+                    "ERR",
+                    "Ollama への接続に失敗しました。"
+                    f" url={candidate.url} error={exc}",
+                )
+                last_error = exc
+                continue
             missing_model, message = _is_model_missing(response)
             try:
                 _raise_with_hint(response, payload, error_message=message or None)
@@ -317,8 +331,17 @@ class OllamaService:
 
             if stream:
                 return self._iter_stream(response)
-            data = response.json()
-            return _extract_response_text(data)
+            try:
+                data = response.json()
+            except ValueError:
+                text = response.text
+            else:
+                text = _extract_response_text(data) or ""
+                if not text:
+                    text = response.text
+            finally:
+                response.close()
+            return text
 
         if last_error is not None:
             raise last_error
