@@ -140,7 +140,11 @@ class OllamaSettings:
             options.update(self.options)
         if options:
             payload["options"] = options
-        if self.modelfile and "modelfile" not in payload:
+        if self.modelfile:
+            # MODELFILE は .env などで指定したものを最優先で利用する。
+            # run_ai_talk_test_v4.py などの手動テストでは payload オプションを
+            # 上書きするケースがあるが、modelfile に関しては環境変数経由の
+            # 指定を常に尊重するため無条件で差し替える。
             payload["modelfile"] = self.modelfile
 
         use_chat_schema = self.is_chat_endpoint() if force_chat is None else force_chat
