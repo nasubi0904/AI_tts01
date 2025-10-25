@@ -18,7 +18,6 @@ from .config import (
     OLLAMA_GENERATE_PATH,
     OLLAMA_HOST,
     OLLAMA_MODEL,
-    OLLAMA_MODELFILE_OPTIONS,
     OLLAMA_OPTIONS,
     OLLAMA_PAYLOAD_OVERRIDES,
 )
@@ -86,7 +85,6 @@ class OllamaSettings:
     generate_path: str
     model: str
     options: Mapping[str, object] | None = None
-    modelfile_options: Mapping[str, object] | None = None
     payload_overrides: Mapping[str, object] | None = None
 
     @classmethod
@@ -96,7 +94,6 @@ class OllamaSettings:
             generate_path=OLLAMA_GENERATE_PATH,
             model=OLLAMA_MODEL,
             options=OLLAMA_OPTIONS or None,
-            modelfile_options=OLLAMA_MODELFILE_OPTIONS or None,
             payload_overrides=OLLAMA_PAYLOAD_OVERRIDES or None,
         )
 
@@ -138,8 +135,6 @@ class OllamaSettings:
             options.update(options_from_overrides)
         if isinstance(self.options, Mapping):
             options.update(self.options)
-        if isinstance(self.modelfile_options, Mapping):
-            options.update(self.modelfile_options)
         if options:
             payload["options"] = options
 
