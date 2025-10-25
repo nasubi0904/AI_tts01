@@ -12,11 +12,12 @@ from __future__ import annotations
 import queue
 import threading
 import traceback
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from dataclasses import replace
 
 from .audio_player import AudioPlayer
 from .config import OLLAMA_MODEL
-from .llm_client import OllamaChatSession, describe_server
+from .llm_client import OllamaChatSession, OllamaService, OllamaSettings
 from .logger import Reporter, log
 from .tts_voicevox import synthesize as tts_synth
 
@@ -27,11 +28,22 @@ _SENTINEL = object()
 class TalkPipeline:
     """オーディオ応答パイプラインの調停役。"""
 
-    def __init__(self, system_prompt: str = "", reporter: Reporter | None = None):
+    def __init__(
+        self,
+        system_prompt: str = "",
+        reporter: Reporter | None = None,
+        *,
+        llm_options: Mapping[str, object] | None = None,
+        llm_payload_overrides: Mapping[str, object] | None = None,
+    ):
         self.reporter = reporter or Reporter()
         self.player = AudioPlayer(reporter=self.reporter)
         self.system_prompt = system_prompt
-        self._chat = OllamaChatSession(system_prompt)
+        self._chat = self._create_chat_session(
+            system_prompt,
+            llm_options=llm_options,
+            llm_payload_overrides=llm_payload_overrides,
+        )
         self._input_q: "queue.Queue[str | object]" = queue.Queue()
         self._tts_q: "queue.Queue[str | object]" = queue.Queue()
         self._stop = threading.Event()
@@ -69,7 +81,7 @@ class TalkPipeline:
     def _log_server_status(self) -> None:
         """初期化時に Ollama サーバーの状態を記録する。"""
 
-        info = describe_server()
+        info = self._chat.service.describe_server()
         host = info.get("host", "(不明)")
         endpoint = info.get("endpoint", "(不明)")
         log(
@@ -133,3 +145,35 @@ class TalkPipeline:
             normalized = sent.strip()
             if normalized:
                 yield normalized
+
+    # ----------------------------------------------------------------- helpers
+    def _create_chat_session(
+        self,
+        system_prompt: str,
+        *,
+        llm_options: Mapping[str, object] | None,
+        llm_payload_overrides: Mapping[str, object] | None,
+    ) -> OllamaChatSession:
+        if not llm_options and not llm_payload_overrides:
+            return OllamaChatSession(system_prompt)
+
+        settings = OllamaSettings.from_env()
+        merged_options: dict[str, object] = {}
+        merged_payload: dict[str, object] = {}
+
+        if isinstance(settings.options, Mapping):
+            merged_options.update(settings.options)
+        if isinstance(settings.payload_overrides, Mapping):
+            merged_payload.update(settings.payload_overrides)
+        if llm_options:
+            merged_options.update(llm_options)
+        if llm_payload_overrides:
+            merged_payload.update(llm_payload_overrides)
+
+        adjusted_settings = replace(
+            settings,
+            options=merged_options or None,
+            payload_overrides=merged_payload or None,
+        )
+        service = OllamaService(adjusted_settings)
+        return OllamaChatSession(system_prompt, service=service)
