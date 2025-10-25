@@ -6,7 +6,9 @@ import argparse
 import json
 import sys
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional
 
 import requests
 
@@ -32,6 +34,7 @@ class CliConfig:
     as_json: bool
     show_payload: bool
     use_generate: bool
+    history_log: Optional[str]
 
 
 class OrunError(RuntimeError):
@@ -77,6 +80,41 @@ def clean_options(
     if num_predict is not None:
         opts["num_predict"] = num_predict
     return opts
+
+
+def append_jsonl_line(path_str: str, record: Dict[str, Any]) -> None:
+    """JSONL ファイルへ 1 行追記する。"""
+
+    path = Path(path_str)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError as exc:  # pragma: no cover - filesystem
+        print(f"[WARN] 履歴ログ {path} に書き込めませんでした: {exc}", file=sys.stderr)
+
+
+def log_chat_history(
+    config: CliConfig, payload: Dict[str, object], response_text: str
+) -> None:
+    """/api/chat へ送信した履歴を JSONL として保存する。"""
+
+    if not config.history_log:
+        return
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        messages = []
+    record: Dict[str, Any] = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "endpoint": "/api/chat",
+        "model": payload.get("model"),
+        "messages": json.loads(json.dumps(messages, ensure_ascii=False)),
+        "options": payload.get("options"),
+        "keep_alive": payload.get("keep_alive"),
+        "stream": payload.get("stream"),
+        "response": response_text,
+    }
+    append_jsonl_line(config.history_log, record)
 
 
 def post_json(url: str, payload: Dict[str, object], stream: bool) -> requests.Response:
@@ -186,17 +224,16 @@ def call_api(config: CliConfig, endpoint: str, payload: Dict[str, object]) -> st
 def dispatch_chat(config: CliConfig, messages: List[Dict[str, str]]) -> str:
     """チャット API を呼び出す。"""
 
-    return call_api(
-        config,
-        f"{config.host}/api/chat",
-        build_chat_payload(
-            config.model,
-            messages,
-            clean_options(config.seed, config.temperature, config.top_p, config.num_predict),
-            config.keep_alive,
-            config.stream,
-        ),
+    payload = build_chat_payload(
+        config.model,
+        messages,
+        clean_options(config.seed, config.temperature, config.top_p, config.num_predict),
+        config.keep_alive,
+        config.stream,
     )
+    response_text = call_api(config, f"{config.host}/api/chat", payload)
+    log_chat_history(config, payload, response_text)
+    return response_text
 
 
 def dispatch_generate(config: CliConfig, prompt: str) -> str:
@@ -281,6 +318,11 @@ def parse_args(argv: Optional[List[str]] = None) -> CliConfig:
     parser.add_argument("--json", action="store_true", help="応答を JSON で出力する")
     parser.add_argument("--show-payload", action="store_true", help="送信 JSON を表示する")
     parser.add_argument("--generate", action="store_true", help="/api/generate を使用する")
+    parser.add_argument(
+        "--history-jsonl",
+        dest="history_jsonl",
+        help="/api/chat に送信した履歴を JSONL で追記保存するパス",
+    )
     args = parser.parse_args(argv)
     if args.generate and args.prompt is None:
         parser.error("--generate を使用する場合はプロンプトを指定してください。")
@@ -298,6 +340,7 @@ def parse_args(argv: Optional[List[str]] = None) -> CliConfig:
         as_json=args.json,
         show_payload=args.show_payload,
         use_generate=args.generate,
+        history_log=args.history_jsonl,
     )
 
 
@@ -306,6 +349,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     config = parse_args(argv)
     print(f"[orun] model: {config.model}", file=sys.stderr)
+    if config.history_log:
+        print(f"[orun] history log: {config.history_log}", file=sys.stderr)
     try:
         if config.prompt is None and not config.use_generate:
             run_repl(config)
