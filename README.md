@@ -21,6 +21,7 @@ python orun.py <model> "<prompt>"
 - seed 固定比較: `python orun.py gpt-oss:20b "2+2=?" --seed 1 --temperature 0 --no-stream`
 - 生成 API: `python orun.py gpt-oss:20b "要約して" --generate`
 - JSON 出力: `python orun.py gpt-oss:20b "短く返答" --json`
+- 履歴 JSONL 保存: `python orun.py gpt-oss:20b "こんにちは" --history-jsonl logs/chat.jsonl`
 
 ## 主なオプション
 
@@ -35,6 +36,7 @@ python orun.py <model> "<prompt>"
 - `--json` : チャンク/最終応答を JSON 行で出力
 - `--show-payload` : 送信 JSON を stderr に表示
 - `--generate` : `/api/generate` を利用するワンショットモード
+- `--history-jsonl <path>` : `/api/chat` へ送信した履歴を JSONL で追記保存
 
 ## 注意事項
 
