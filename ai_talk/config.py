@@ -2,7 +2,7 @@
 """
 共通設定。環境変数 .env / tts.env を読み込む。
 """
-import os, json, sys, shlex
+import os, json
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -60,112 +60,10 @@ def _normalize_api_path(path: str, default: str = "/api/chat") -> str:
         trimmed = "/" + trimmed
     return trimmed.rstrip("/") or default
 
-def _load_modelfile_content() -> str | None:
-    """MODELFILE に指定された Modelfile を読み込む。
-
-    - 絶対パス / 相対パス双方に対応する。
-    - 読み込みに失敗した場合は標準エラー出力へ警告を表示し、None を返す。
-    """
-
-    raw = os.getenv("MODELFILE", "").strip()
-    if not raw:
-        return None
-
-    path = Path(raw)
-    candidates: list[Path] = []
-    if path.is_absolute():
-        candidates.append(path)
-    else:
-        candidates.append(Path.cwd() / path)
-        repo_candidate = _ROOT_DIR / path
-        if repo_candidate not in candidates:
-            candidates.append(repo_candidate)
-
-    for candidate in candidates:
-        try:
-            return candidate.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
-            print(
-                f"MODELFILE='{raw}' の読み込みに失敗しました: {exc}",
-                file=sys.stderr,
-            )
-            return None
-
-    print(
-        f"MODELFILE='{raw}' で指定されたファイルが見つかりません。",
-        file=sys.stderr,
-    )
-    return None
-
-
-def _parse_modelfile_value(value: str) -> object:
-    """PARAMETER の値として指定された文字列を適切な型へ変換する。"""
-
-    stripped = value.strip()
-    if not stripped:
-        return ""
-
-    try:
-        return json.loads(stripped)
-    except Exception:
-        pass
-
-    lowered = stripped.lower()
-    if lowered == "true":
-        return True
-    if lowered == "false":
-        return False
-    if lowered == "null":
-        return None
-
-    try:
-        if any(ch in stripped for ch in (".", "e", "E")):
-            return float(stripped)
-        return int(stripped)
-    except ValueError:
-        return stripped
-
-
-def _parse_modelfile_options(content: str) -> dict[str, object]:
-    """Modelfile 内の PARAMETER 指定を options 辞書へ変換する。"""
-
-    options: dict[str, object] = {}
-    for line in content.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        try:
-            tokens = shlex.split(stripped, comments=True, posix=True)
-        except ValueError:
-            continue
-        if not tokens:
-            continue
-        if tokens[0].lower() != "parameter" or len(tokens) < 3:
-            continue
-        key = tokens[1]
-        value_str = " ".join(tokens[2:])
-        options[key] = _parse_modelfile_value(value_str)
-    return options
-
-
-def _load_modelfile_options() -> dict[str, object] | None:
-    """環境変数 MODELFILE の内容を基に options を構築する。"""
-
-    content = _load_modelfile_content()
-    if not content:
-        return None
-    options = _parse_modelfile_options(content)
-    return options or None
-
-
 # 404 対策として generate 用エンドポイントを環境変数で切り替え可能にする。
 # 既定値はチャットエンドポイント /api/chat。
 OLLAMA_GENERATE_PATH = _normalize_api_path(os.getenv("OLLAMA_GENERATE_PATH", "/api/chat"))
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1")
-# Ollama の modelfile から PARAMETER を抽出し options を拡張する。
-OLLAMA_MODELFILE_OPTIONS = _load_modelfile_options()
 # 速度調整に使う Ollama options をJSON文字列で渡せる
 # 例: OLLAMA_OPTIONS_JSON={"num_predict":128,"temperature":0.6}
 # エンドポイントを /api/generate などに切り替えたい場合は OLLAMA_GENERATE_PATH を設定する。
