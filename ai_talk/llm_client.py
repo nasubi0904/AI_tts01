@@ -379,31 +379,6 @@ class OllamaService:
         result = self._perform_request(messages, stream=True, timeout=None)
         return result if isinstance(result, Iterator) else iter(())
 
-    # ----------------------------------------------------------------- 高レベル API
-    def generate(self, prompt: str, system: str = "") -> str:
-        messages: list[dict[str, str]] = []
-        system_text = system.strip()
-        if system_text:
-            messages.append({"role": "system", "content": system_text})
-        messages.append({"role": "user", "content": prompt})
-        return self.request_text(messages)
-
-    def stream(self, prompt: str, system: str = "") -> Iterator[str]:
-        messages: list[dict[str, str]] = []
-        system_text = system.strip()
-        if system_text:
-            messages.append({"role": "system", "content": system_text})
-        messages.append({"role": "user", "content": prompt})
-
-        buffer = ""
-        for chunk in self.request_stream(messages):
-            sentences, buffer = _collect_sentences(buffer + chunk)
-            for sentence in sentences:
-                yield sentence
-        tail = buffer.strip()
-        if tail:
-            yield tail
-
     # ----------------------------------------------------------------- 診断情報
     def describe_server(self, *, force_refresh: bool = False, timeout: float = 3.0) -> dict[str, object]:
         if not force_refresh and self._server_cache is not None:
@@ -464,14 +439,6 @@ _GLOBAL_SERVICE = OllamaService(OllamaSettings.from_env())
 
 def describe_server(*, force_refresh: bool = False, timeout: float = 3.0) -> dict:
     return _GLOBAL_SERVICE.describe_server(force_refresh=force_refresh, timeout=timeout)
-
-
-def generate(prompt: str, system: str = "") -> str:
-    return _GLOBAL_SERVICE.generate(prompt, system)
-
-
-def stream(prompt: str, system: str = "") -> Iterable[str]:
-    return _GLOBAL_SERVICE.stream(prompt, system)
 
 
 # --------------------------------------------------------------------------------------
@@ -535,23 +502,6 @@ class OllamaChatSession:
         assistant_text = "".join(collected)
         self._append_assistant(assistant_text)
 
-    def complete(self, user_text: str) -> str:
-        clean = user_text.strip()
-        if not clean:
-            return ""
-
-        self._append_user(clean)
-        try:
-            text = self.service.request_text(self.messages)
-        except Exception:
-            if self.messages:
-                self.messages.pop()
-            raise
-        else:
-            assistant_text = text.strip()
-            self._append_assistant(assistant_text)
-            return text
-
 
 __all__ = [
     "OllamaChatSession",
@@ -559,7 +509,5 @@ __all__ = [
     "OllamaService",
     "OllamaSettings",
     "describe_server",
-    "generate",
-    "stream",
 ]
 
