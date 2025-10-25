@@ -17,6 +17,11 @@ else:
     from .pipeline import TalkPipeline
     from .logger import Reporter, setup, log
 
+# デモ用のシステムプロンプト。用途に応じて書き換えて利用する。
+SYSTEM_PROMPT = """\
+あなたはデモ用の会話アシスタントです。簡潔かつ丁寧に返答してください。
+"""
+
 # Ollama へ渡す生成パラメータを細かく制御する。
 OLLAMA_GENERATION_OPTIONS = {
     "temperature": 0.7,  # 創造性を司る温度。高いほど多様な応答になる。
@@ -42,6 +47,7 @@ def demo_keyboard(verbose=True, color=True):
     setup(verbose=verbose, color=color)
     rep = Reporter()
     tp = TalkPipeline(
+        system_prompt=SYSTEM_PROMPT,
         reporter=rep,
         llm_options=OLLAMA_GENERATION_OPTIONS,
         llm_payload_overrides=OLLAMA_PAYLOAD_OVERRIDES,
