@@ -1,13 +1,26 @@
 
-"""
-簡易ロガー＋レポーター。ANSI色つき。VSCodeターミナル対応。
-"""
-import sys, time, os
+"""簡易ロガーと処理時間計測レポーター。
 
-COLORS = {
+責務分離・可読性向上・冗長性排除を目的に、ログ出力機構とレポート機能を
+明確に分割している。VSCode ターミナルなど ANSI 対応環境での色付き出力に
+対応する。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+import os
+import sys
+import time
+from typing import Final, Mapping, TextIO
+
+
+# ---------------------------------------------------------------------------
+# 設定および色付けロジック
+
+
+DEFAULT_PALETTE: Final[Mapping[str, str]] = {
     "RESET": "\033[0m",
-    "DIM": "\033[2m",
-    "BOLD": "\033[1m",
     "INFO": "\033[36m",
     "LLM": "\033[35m",
     "TTS": "\033[33m",
@@ -16,59 +29,136 @@ COLORS = {
     "ERR": "\033[31m",
 }
 
-_VERBOSE = True
-_COLOR = True
 
-def setup(verbose: bool=True, color: bool=True):
-    global _VERBOSE, _COLOR
-    _VERBOSE = verbose
-    _COLOR = color and (os.getenv("NO_COLOR","")=="")
+@dataclass(slots=True)
+class LoggerConfig:
+    """ログ出力の挙動を司る設定値。"""
 
-def _c(tag):
-    return COLORS.get(tag, "")
+    verbose: bool = True
+    enable_color: bool = True
 
-def log(tag: str, msg: str):
-    if not _VERBOSE and tag not in ("ERR",):
-        return
-    ts = time.strftime("%H:%M:%S")
-    if _COLOR:
-        sys.stdout.write(f"{_c(tag)}[{ts} {tag}] {msg}{_c('RESET')}\n")
-    else:
-        sys.stdout.write(f"[{ts} {tag}] {msg}\n")
-    sys.stdout.flush()
+    def color_enabled(self) -> bool:
+        """NO_COLOR 環境変数を考慮した色出力可否を返す。"""
 
+        return self.enable_color and (os.getenv("NO_COLOR", "") == "")
+
+    def should_emit(self, tag: str) -> bool:
+        """指定タグを出力対象とするか判定する。"""
+
+        return self.verbose or tag == "ERR"
+
+
+@dataclass(slots=True)
+class AnsiColorFormatter:
+    """ANSI カラーコードを用いてログ行を整形するフォーマッタ。"""
+
+    palette: Mapping[str, str] = field(default_factory=lambda: DEFAULT_PALETTE)
+
+    def apply(self, tag: str, message: str) -> str:
+        """タグに応じた色付けを適用した文字列を返す。"""
+
+        color = self.palette.get(tag, "")
+        reset = self.palette.get("RESET", "")
+        return f"{color}{message}{reset}" if color and reset else message
+
+
+@dataclass(slots=True)
+class ConsoleLogger:
+    """コンソールへログを出力する軽量ロガー。"""
+
+    config: LoggerConfig = field(default_factory=LoggerConfig)
+    formatter: AnsiColorFormatter = field(default_factory=AnsiColorFormatter)
+    stream: TextIO = field(default=sys.stdout, repr=False)
+
+    def log(self, tag: str, message: str) -> None:
+        """タグ付きメッセージを出力する。"""
+
+        if not self.config.should_emit(tag):
+            return
+        timestamp = time.strftime("%H:%M:%S")
+        base = f"[{timestamp} {tag}] {message}"
+        rendered = base
+        if self.config.color_enabled():
+            rendered = self.formatter.apply(tag, base)
+        self.stream.write(rendered + "\n")
+        self.stream.flush()
+
+
+# ---------------------------------------------------------------------------
+# グローバルエントリポイント
+
+
+_GLOBAL_CONFIG = LoggerConfig()
+_GLOBAL_LOGGER = ConsoleLogger(config=_GLOBAL_CONFIG)
+
+
+def setup(*, verbose: bool = True, color: bool = True) -> None:
+    """グローバルなログ設定を更新する。"""
+
+    _GLOBAL_CONFIG.verbose = verbose
+    _GLOBAL_CONFIG.enable_color = color
+
+
+def log(tag: str, message: str) -> None:
+    """グローバルロガーを利用してメッセージを出力する。"""
+
+    _GLOBAL_LOGGER.log(tag, message)
+
+
+# ---------------------------------------------------------------------------
+# レポーター: 処理時間やイベントの可視化
+
+
+@dataclass(slots=True)
 class Reporter:
-    def __init__(self):
-        self.t0 = None
-        self.first_token = None
-        self.first_tts = None
-        self.first_play = None
+    """各処理段階のタイムスタンプを記録しログへ通知する。"""
 
-    def start_round(self, prompt:str):
-        self.t0 = time.perf_counter()
-        self.first_token = self.first_tts = self.first_play = None
-        log("INFO", f"PROMPT: {prompt}")
+    logger: ConsoleLogger = field(default_factory=lambda: _GLOBAL_LOGGER)
+    _started_at: float | None = field(default=None, init=False, repr=False)
+    _first_token: float | None = field(default=None, init=False, repr=False)
+    _first_tts: float | None = field(default=None, init=False, repr=False)
+    _first_play: float | None = field(default=None, init=False, repr=False)
 
-    def llm_sentence(self, text:str):
+    def start_round(self, prompt: str) -> None:
+        """新しいユーザー入力処理を開始したことを記録する。"""
+
+        self._started_at = time.perf_counter()
+        self._first_token = self._first_tts = self._first_play = None
+        self.logger.log("INFO", f"PROMPT: {prompt}")
+
+    def llm_sentence(self, text: str) -> None:
+        """LLM から文を受領した際の計測とログ出力。"""
+
         now = time.perf_counter()
-        if self.first_token is None and self.t0 is not None:
-            self.first_token = now - self.t0
-            log("LLM", f"first_sentence {self.first_token*1000:.0f} ms")
-        log("LLM", f"{text}")
+        if self._first_token is None and self._started_at is not None:
+            self._first_token = now - self._started_at
+            self.logger.log("LLM", f"first_sentence {self._first_token * 1000:.0f} ms")
+        self.logger.log("LLM", text)
 
-    def tts_ready(self, text:str, nbytes:int):
+    def tts_ready(self, text: str, nbytes: int) -> None:
+        """TTS 音声生成完了を記録し、バイト数などを報告する。"""
+
         now = time.perf_counter()
-        if self.first_tts is None and self.t0 is not None:
-            self.first_tts = now - self.t0
-            log("TTS", f"first_audio_ready {self.first_tts*1000:.0f} ms")
-        log("TTS", f"queued bytes={nbytes} text='{text[:24]}'")
+        if self._first_tts is None and self._started_at is not None:
+            self._first_tts = now - self._started_at
+            self.logger.log("TTS", f"first_audio_ready {self._first_tts * 1000:.0f} ms")
+        preview = text[:24]
+        self.logger.log("TTS", f"queued bytes={nbytes} text='{preview}'")
 
-    def play_start(self, text:str):
+    def play_start(self, text: str) -> None:
+        """音声再生開始時の遅延を計測しログ出力する。"""
+
         now = time.perf_counter()
-        if self.first_play is None and self.t0 is not None:
-            self.first_play = now - self.t0
-            log("PLAY", f"first_play {self.first_play*1000:.0f} ms")
-        log("PLAY", f"start '{text[:24]}'")
+        if self._first_play is None and self._started_at is not None:
+            self._first_play = now - self._started_at
+            self.logger.log("PLAY", f"first_play {self._first_play * 1000:.0f} ms")
+        preview = text[:24]
+        self.logger.log("PLAY", f"start '{preview}'")
 
-    def error(self, scope:str, e:Exception):
-        log("ERR", f"{scope}: {e}")
+    def error(self, scope: str, exc: Exception) -> None:
+        """処理中に発生した例外情報を記録する。"""
+
+        self.logger.log("ERR", f"{scope}: {exc}")
+
+
+__all__ = ["ConsoleLogger", "Reporter", "setup", "log"]
