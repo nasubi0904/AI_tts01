@@ -9,10 +9,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 import os
 import sys
 import time
-from typing import Final, Mapping, TextIO
+from typing import Final, Mapping, Sequence, TextIO
 
 
 # ---------------------------------------------------------------------------
@@ -22,6 +23,7 @@ from typing import Final, Mapping, TextIO
 DEFAULT_PALETTE: Final[Mapping[str, str]] = {
     "RESET": "\033[0m",
     "INFO": "\033[36m",
+    "PROMPT": "\033[36m",
     "LLM": "\033[35m",
     "TTS": "\033[33m",
     "PLAY": "\033[32m",
@@ -119,12 +121,23 @@ class Reporter:
     _first_tts: float | None = field(default=None, init=False, repr=False)
     _first_play: float | None = field(default=None, init=False, repr=False)
 
-    def start_round(self, prompt: str) -> None:
+    def start_round(self, prompt_payload: Mapping[str, object] | Sequence[Mapping[str, str]] | None) -> None:
         """新しいユーザー入力処理を開始したことを記録する。"""
 
         self._started_at = time.perf_counter()
         self._first_token = self._first_tts = self._first_play = None
-        self.logger.log("INFO", f"PROMPT: {prompt}")
+        payload_object: object
+        if isinstance(prompt_payload, Mapping):
+            payload_object = prompt_payload
+        elif isinstance(prompt_payload, Sequence):
+            payload_object = list(prompt_payload)
+        else:
+            payload_object = ""
+        try:
+            serialized = json.dumps(payload_object, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError):
+            serialized = repr(payload_object)
+        self.logger.log("PROMPT", serialized)
 
     def llm_sentence(self, text: str) -> None:
         """LLM から文を受領した際の計測とログ出力。"""
@@ -141,9 +154,7 @@ class Reporter:
         now = time.perf_counter()
         if self._first_tts is None and self._started_at is not None:
             self._first_tts = now - self._started_at
-            self.logger.log("TTS", f"first_audio_ready {self._first_tts * 1000:.0f} ms")
-        preview = text[:24]
-        self.logger.log("TTS", f"queued bytes={nbytes} text='{preview}'")
+        _ = text, nbytes  # 将来の拡張に備え、引数は維持する
 
     def play_start(self, text: str) -> None:
         """音声再生開始時の遅延を計測しログ出力する。"""
@@ -151,9 +162,7 @@ class Reporter:
         now = time.perf_counter()
         if self._first_play is None and self._started_at is not None:
             self._first_play = now - self._started_at
-            self.logger.log("PLAY", f"first_play {self._first_play * 1000:.0f} ms")
-        preview = text[:24]
-        self.logger.log("PLAY", f"start '{preview}'")
+        _ = text  # ログ抑制のため未使用扱い
 
     def error(self, scope: str, exc: Exception) -> None:
         """処理中に発生した例外情報を記録する。"""

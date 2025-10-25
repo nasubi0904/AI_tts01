@@ -48,7 +48,8 @@ class TalkPipeline:
         normalized = (text or "").strip()
         if not normalized:
             return
-        self.reporter.start_round(normalized)
+        prompt_payload = self._chat.compose_stream_payload(normalized)
+        self.reporter.start_round(prompt_payload)
         self._input_q.put(normalized)
 
     def close(self) -> None:

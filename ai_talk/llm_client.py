@@ -468,6 +468,26 @@ class OllamaChatSession:
         if text.strip():
             self.messages.append({"role": "assistant", "content": text})
 
+    def compose_stream_payload(self, user_text: str) -> dict[str, object]:
+        """ストリーミング要求に送信するペイロードを組み立てる。"""
+
+        clean = user_text.strip()
+        if not clean:
+            return {}
+
+        messages: list[dict[str, str]] = []
+        for message in self.messages:
+            if isinstance(message, Mapping):
+                messages.append(
+                    {
+                        "role": str(message.get("role", "")),
+                        "content": str(message.get("content", "")),
+                    }
+                )
+        messages.append({"role": "user", "content": clean})
+        payload = self.service.settings.build_payload(messages, stream=True, force_chat=None)
+        return payload
+
     # ---------------------------------------------------------------- public
     def stream_sentences(self, user_text: str) -> Iterable[str]:
         clean = user_text.strip()
